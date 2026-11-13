@@ -139,13 +139,68 @@ describe("silent update lifecycle", () => {
     await updater.initialize();
     await flush();
 
-    expect(mocks.checkForUpdates).toHaveBeenCalledExactlyOnceWith("en", "official", "beta");
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "beta");
+    // The running beta build has no promotion recorded, so the check also
+    // consults the stable manifest once to learn whether it was promoted (#14739).
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "stable");
     expect(updater.updateInfo.value?.update_available).toBe(false);
     expect(updater.showUpdateDialog.value).toBe(false);
 
     // An explicit check must still open the center, even when already up to date.
     await updater.checkUpdates();
     expect(updater.showUpdateDialog.value).toBe(true);
+  });
+
+  it("learns a promotion from the stable manifest while on the beta channel (#14739)", async () => {
+    const build = "0.6.69-beta.20261110.1";
+    const betaInfo = { ...info, current_version: build, latest_version: build, channel: "beta" as const, update_available: false };
+    const stableInfo = { ...info, current_version: build, latest_version: "0.6.69", channel: "stable" as const, update_available: false, promoted_from: build };
+    mocks.checkForUpdates.mockImplementation(async (_locale: unknown, _source: unknown, channel: unknown) => (channel === "stable" ? stableInfo : betaInfo));
+    localStorage.clear();
+    const updater = mount();
+
+    // Settings are loaded asynchronously after the composable is created.
+    settings.updateChannel = "beta";
+    await flush();
+
+    await updater.initialize();
+    await vi.waitFor(() => expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "stable"));
+    await flush();
+
+    // The beta manifest never carries promoted_from, so the check consults the
+    // stable manifest once to learn that this build was promoted to stable.
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "beta");
+    expect(localStorage.getItem("dbx:promoted-build")).toBe(build);
+    expect(updater.updateCheckMessage.value).toBe("DBX is up to date (0.6.69).");
+
+    // Once learned, a later check stops consulting the stable manifest.
+    mocks.checkForUpdates.mockClear();
+    await updater.checkUpdates({ silent: true });
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "beta");
+  });
+
+  it("does not consult the stable manifest again when already on the stable channel", async () => {
+    const build = "0.6.68-beta.20261109.1";
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: build, latest_version: build, channel: "stable", update_available: false });
+    const updater = mount();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "stable");
+  });
+
+  it("does not consult the stable manifest for a plain stable build on the beta channel", async () => {
+    mocks.checkForUpdates.mockResolvedValue({ ...info, current_version: "0.6.69", latest_version: "0.6.69", channel: "beta", update_available: false });
+    const updater = mount();
+    settings.updateChannel = "beta";
+    await flush();
+    await updater.initialize();
+    await flush();
+
+    expect(mocks.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mocks.checkForUpdates).toHaveBeenCalledWith("en", "official", "beta");
   });
 
   it("discards the promoted stable cache when its beta binary is already running", async () => {

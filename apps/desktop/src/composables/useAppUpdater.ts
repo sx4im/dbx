@@ -281,6 +281,30 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
     if (message.toLowerCase().includes("powershell")) return t("updates.portableHelperFailed", { error: message });
     return t("updates.installFailed", { error: message });
   }
+  /**
+   * A promoted beta keeps its beta build version after a manual stable
+   * install, and only the stable manifest records the promotion
+   * (`promoted_from`). A user on the beta channel never fetches that
+   * manifest, so the support info keeps showing the beta tag forever
+   * (#14739). When the running build is still a prerelease and no
+   * promotion has been learned for it yet, consult the stable manifest
+   * once purely to learn the promotion; the beta-channel result still
+   * owns the dialog. Best-effort: a failed lookup is retried on the next
+   * check, and it never marks the update check itself as failed.
+   */
+  async function learnPromotionFromStableManifest(info: api.UpdateInfo, token: number): Promise<void> {
+    if (updateChannel.value === "stable") return;
+    const parsed = parseUpdateVersion(normalizeUpdateVersion(info.current_version));
+    if (!parsed || !parsed.prerelease.length) return;
+    if (displayAppVersion(info.current_version) !== info.current_version) return;
+    try {
+      const stable = await api.checkForUpdates(currentLocale(), normalizeUpdateDownloadSource(settingsStore.editorSettings.updateDownloadSource), "stable");
+      if (token !== generation || disposed) return;
+      recordPromotedBuild(stable);
+    } catch {
+      // Promotion learning is best-effort; the next check retries it.
+    }
+  }
   async function checkUpdates(checkOptions: { silent?: boolean } = {}) {
     if (updaterDisabled || disposed || isIgnoringUpdate.value) return;
     if (checkOptions.silent && !updateEntryVisible.value) return;
@@ -304,6 +328,7 @@ export function useAppUpdater(options: UseAppUpdaterOptions = {}) {
       if (token !== generation || disposed) return;
       updateInfo.value = info;
       recordPromotedBuild(info);
+      await learnPromotionFromStableManifest(info, token);
       // Installation may have started while the check was in flight; only restore
       // the phase this check itself owns.
       if (phase.value === "checking") phase.value = downloaded.value ? "ready" : "idle";
