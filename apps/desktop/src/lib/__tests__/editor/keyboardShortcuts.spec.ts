@@ -114,6 +114,22 @@ describe("keyboard shortcut matching", () => {
     expect(matchesShortcut({ key: "?", code: "Period", ctrlKey: true, shiftKey: true }, "Shift+Mod+/", "Win32")).toBe(false);
   });
 
+  it("matches a shifted punctuation press against a shortcut stored without Shift", () => {
+    // #14883: the default toggle-line-comment shortcut is Mod+/, but pressing
+    // the main-keyboard ?/ key as Ctrl+Shift+/ (key "?", code Slash) never
+    // matched it, while Ctrl+NumpadDivide did. Shift only produces the "?"
+    // character here, so it must not block the match.
+    const shiftedSlash = { key: "?", code: "Slash", ctrlKey: true, shiftKey: true };
+    expect(matchesShortcut(shiftedSlash, "Mod+/", "Win32")).toBe(true);
+    // A plain Ctrl+/ press must also match a shortcut recorded as Shift+Mod+/.
+    expect(matchesShortcut({ key: "/", code: "Slash", ctrlKey: true }, "Shift+Mod+/", "Win32")).toBe(true);
+    // Same for other shifted punctuation (Shift+1 produces "!").
+    expect(matchesShortcut({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true }, "Mod+1", "Win32")).toBe(true);
+    // Shift stays meaningful for letter keys.
+    expect(matchesShortcut({ key: "C", code: "KeyC", ctrlKey: true, shiftKey: true }, "Mod+C", "Win32")).toBe(false);
+    expect(matchesShortcut({ key: "c", code: "KeyC", ctrlKey: true }, "Mod+Shift+C", "Win32")).toBe(false);
+  });
+
   it("leaves unshifted and letter keys untouched", () => {
     expect(eventToShortcut({ key: "/", code: "Slash", ctrlKey: true }, "Win32")).toBe("Mod+/");
     expect(eventToShortcut({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }, "Win32")).toBe("Shift+Mod+A");

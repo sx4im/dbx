@@ -106,6 +106,7 @@ describe("createQueryEditorLineCommentShortcutBindings", () => {
     ["IME Process key while isComposing", { key: "Process", code: "Slash", ctrlKey: true, isComposing: true }],
     ["numpad divide key (Divide)", { key: "Divide", code: "NumpadDivide", ctrlKey: true }],
     ["numpad divide key (/)", { key: "/", code: "NumpadDivide", ctrlKey: true }],
+    ["shifted main-keyboard question mark (?)", { key: "?", code: "Slash", ctrlKey: true, shiftKey: true }],
   ])("dispatches line comment for %s on Windows", (_name, eventInit) => {
     const run = vi.fn(() => true);
     const view = createView("Mod+/", run, "Win32");

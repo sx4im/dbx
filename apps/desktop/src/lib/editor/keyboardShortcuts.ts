@@ -244,7 +244,14 @@ export function matchesShortcut(event: ShortcutLikeEvent, shortcut: string, plat
   }
 
   if (!!event.altKey !== modifiers.has("Alt")) return false;
-  if (!!event.shiftKey !== modifiers.has("Shift")) return false;
+  // Shift only produces the target punctuation/digit character (e.g. "?" on
+  // Slash -> "/"): the physical key is the same with or without Shift, so a
+  // Mod+/ shortcut must also fire on Ctrl+Shift+/ (#14883). Without this the
+  // base-key resolution in baseKeyForEvent never runs for shifted presses,
+  // because the modifier gate rejects them first.
+  const baseKey = baseKeyForEvent(event);
+  const shiftIsKeyProducer = !!baseKey && normalizeKey(baseKey) === normalizeKey(key);
+  if (!!event.shiftKey !== modifiers.has("Shift") && !shiftIsKeyProducer) return false;
   return matchesShortcutKey(event, key, platform);
 }
 
