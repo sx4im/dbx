@@ -386,4 +386,74 @@ describe("useNavigationTargets openTableTarget", () => {
     expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
     resetRowIdLocatorStateForTests();
   });
+
+  it("retries the metadata re-query without the synthetic row-id locator when the engine rejects it (Greenplum AO, #14922)", async () => {
+    const { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(false);
+    // Greenplum AO table, engine not yet detected (no SELECT version() probe
+    // on the connection): the eager metadata load fails, so the first query
+    // runs without the locator and succeeds; the metadata-after-first-query
+    // re-query then injects it and the segments reject it with Invalid attnum.
+    // That re-query is the one locator-bearing execution without a fallback —
+    // it must degrade to read-only like the first-query retry above.
+    mocks.databaseType = "postgres";
+    mocks.getColumns.mockResolvedValue([{ ...column("payload"), is_primary_key: false }]);
+    mocks.getColumns.mockRejectedValueOnce(new Error("metadata unavailable"));
+    mocks.listIndexes.mockResolvedValue([]);
+    mocks.buildTableSelectSql.mockImplementation(async ({ tableName, includeRowId }: { tableName: string; includeRowId?: boolean }) => (includeRowId ? `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM ${tableName}` : `SELECT * FROM ${tableName}`));
+    mocks.executeTabSql.mockImplementation(async (id: string, sql?: string) => {
+      const tab = mocks.tabs.find((item) => item.id === id);
+      if (!tab || typeof sql !== "string") return;
+      if (sql.includes("__DBX_ROWID")) {
+        tab.result = { columns: ["db error"], rows: [["ERROR: Invalid attnum: -3"]], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"];
+      } else {
+        tab.result = { columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as QueryTab["result"];
+      }
+    });
+
+    await useNavigationTargets(dialogs).openTableTarget({ connectionId: "connection-1", database: "app", tableName: "users", tableType: "TABLE" });
+
+    const executedSql = mocks.executeTabSql.mock.calls.map((call) => String(call[1]));
+    expect(executedSql).toHaveLength(3);
+    expect(executedSql[0]).not.toContain("__DBX_ROWID");
+    expect(executedSql[1]).toContain("__DBX_ROWID");
+    expect(executedSql[2]).not.toContain("__DBX_ROWID");
+    expect(mocks.tabs[0]?.result?.columns).toEqual(["payload"]);
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
+    resetRowIdLocatorStateForTests();
+  });
+
+  it("retries the metadata re-query without the locator for a view opened without a table type (#14922)", async () => {
+    const { resetRowIdLocatorStateForTests, rowIdLocatorUnsupported } = await import("@/lib/table/tableRowIdSupport");
+    resetRowIdLocatorStateForTests();
+    // Views opened from lineage/diagram targets carry no tableType, so the
+    // target defaults to TABLE and the re-query injects tableoid/ctid/xmin —
+    // which a view cannot select. Same degradation: retry without the
+    // locator so the view still opens (read-only).
+    mocks.databaseType = "postgres";
+    mocks.getColumns.mockResolvedValue([{ ...column("payload"), is_primary_key: false }]);
+    mocks.getColumns.mockRejectedValueOnce(new Error("metadata unavailable"));
+    mocks.listIndexes.mockResolvedValue([]);
+    mocks.buildTableSelectSql.mockImplementation(async ({ tableName, includeRowId }: { tableName: string; includeRowId?: boolean }) => (includeRowId ? `SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS "__DBX_ROWID", * FROM ${tableName}` : `SELECT * FROM ${tableName}`));
+    mocks.executeTabSql.mockImplementation(async (id: string, sql?: string) => {
+      const tab = mocks.tabs.find((item) => item.id === id);
+      if (!tab || typeof sql !== "string") return;
+      if (sql.includes("__DBX_ROWID")) {
+        tab.result = { columns: ["db error"], rows: [['ERROR: column "tableoid" does not exist']], affected_rows: 0, execution_time_ms: 1, execution_error: true } as QueryTab["result"];
+      } else {
+        tab.result = { columns: ["payload"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } as QueryTab["result"];
+      }
+    });
+
+    await useNavigationTargets(dialogs).openLineageTarget({ connectionId: "connection-1", database: "app", schema: "public", tableName: "users" });
+
+    const executedSql = mocks.executeTabSql.mock.calls.map((call) => String(call[1]));
+    expect(executedSql).toHaveLength(3);
+    expect(executedSql[1]).toContain("__DBX_ROWID");
+    expect(executedSql[2]).not.toContain("__DBX_ROWID");
+    expect(mocks.tabs[0]?.result?.columns).toEqual(["payload"]);
+    expect(rowIdLocatorUnsupported("connection-1")).toBe(true);
+    resetRowIdLocatorStateForTests();
+  });
 });

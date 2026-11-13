@@ -335,30 +335,56 @@ async function openTableTarget(target: NavigationTarget, options: NavigationOpen
         primaryKeys,
       });
       if (!fellBackToLimitZero && !firstQueryFailed && ((useRowId && !eagerIncludeRowId) || config.db_type === "tdengine")) {
-        const newSql = await buildTableSelectSql({
-          databaseType: effectiveDbType,
-          driverProfile: config.driver_profile,
-          serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
-          identifierQuote,
-          schema: tableSchema,
-          catalog: target.catalog,
-          database: target.database,
-          tableName: target.tableName,
-          includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
-          injectDefaultTimeSeriesWhere: true,
-          tableType: targetTableType,
-          whereInput: target.whereInput,
-          primaryKeys,
-          columns: columns.map((column) => column.name),
-          ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, pageLimit, config.db_type === "jdbc"),
-          includeRowId: true,
-          orderBy: defaultSort.orderBy,
-          limit: pageLimit,
-        });
+        const buildRequerySql = (withRowId: boolean) =>
+          buildTableSelectSql({
+            databaseType: effectiveDbType,
+            driverProfile: config.driver_profile,
+            serverVersion: connectionStore.getConfig(target.connectionId)?.database_info?.productVersion,
+            identifierQuote,
+            schema: tableSchema,
+            catalog: target.catalog,
+            database: target.database,
+            tableName: target.tableName,
+            includeDatabaseName: settingsStore.editorSettings.generateSqlIncludeDatabaseName,
+            injectDefaultTimeSeriesWhere: true,
+            tableType: targetTableType,
+            whereInput: target.whereInput,
+            primaryKeys,
+            columns: columns.map((column) => column.name),
+            ...tableDataLargeValuePreviewOptions(effectiveDbType, columns, primaryKeys, pageLimit, config.db_type === "jdbc"),
+            includeRowId: withRowId,
+            orderBy: defaultSort.orderBy,
+            limit: pageLimit,
+          });
+        const cancelCountBeforeRequery = queryStore.tabs.find((tab) => tab.id === tabId)?.cancelRequestCount ?? 0;
+        const newSql = await buildRequerySql(true);
         if (!isCurrentTarget()) return;
         queryStore.updateSql(tabId, newSql);
         await queryStore.executeTabSql(tabId, newSql, { pagination: { limit: pageLimit, offset: 0 } });
         if (isCurrentTarget() && targetTab) applyTableDefaultSortResult(targetTab, defaultSort, queryStore.sortTabResultLocally);
+        // The metadata-after-first-query re-query is the one locator-bearing
+        // execution without a fallback: an engine that rejects the synthetic
+        // row-id locator (Greenplum AO tables, #14922; Hologres, #12647) fails
+        // it after the first query already succeeded, so the error would
+        // otherwise stand as the final result. Retry once without the locator
+        // so the table still opens (read-only), and remember the connection —
+        // the same degradation contract as the first-query retry above.
+        const requeryTab = queryStore.tabs.find((tab) => tab.id === tabId);
+        const cancelRequestedDuringRequery = (requeryTab?.cancelRequestCount ?? 0) > cancelCountBeforeRequery;
+        if (isCurrentTarget() && !cancelRequestedDuringRequery && requeryTab?.isCancelling !== true && shouldRetryWithoutRowIdLocator(newSql, requeryTab?.result)) {
+          try {
+            const fallbackSql = await buildRequerySql(false);
+            if (!isCurrentTarget() || !isCurrentGeneration()) return;
+            queryStore.updateSql(tabId, fallbackSql);
+            await queryStore.executeTabSql(tabId, fallbackSql, { pagination: { limit: pageLimit, offset: 0 } });
+            if (!isCurrentTarget()) return;
+            const retryTab = queryStore.tabs.find((tab) => tab.id === tabId);
+            if (shouldKeepRowIdLocatorDisabled(retryTab?.result)) markRowIdLocatorUnsupported(target.connectionId);
+          } catch {
+            // Fallback execution keeps its own error result visible and must not
+            // change the connection capability memory.
+          }
+        }
       }
     } catch (reason) {
       console.error("[DBX] ERROR fetching table metadata:", reason);
