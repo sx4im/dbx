@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{broadcast, oneshot, watch, Mutex, RwLock};
@@ -104,9 +104,23 @@ impl PluginSessionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct PluginHandshake {
     pub protocol_version: u32,
-    #[serde(default)]
+    // `#[serde(default)]` alone only covers a missing field. A plugin that
+    // encodes a nil capability list as JSON `null` (Go's `encoding/json`
+    // does this for a nil slice) would otherwise fail the whole handshake
+    // with "invalid type: null, expected a sequence", so accept null as empty.
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub capabilities: Vec<String>,
     pub plugin: PluginHandshakeIdentity,
+}
+
+/// Deserialize an explicit JSON `null` as the type's default value.
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    let value = Option::<T>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -498,8 +512,21 @@ impl PluginSidecarSession {
             permissions: &self.plugin.manifest.permissions,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
-        let handshake: PluginHandshake =
-            self.invoke_with_timeout("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT)).await?;
+        let value = self
+            .invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT))
+            .await?;
+        let handshake: PluginHandshake = serde_json::from_value(value.clone()).map_err(|error| {
+            // Name the offending field: a bare serde error ("invalid type:
+            // null, expected a sequence") does not say which field failed,
+            // and plugin authors had to read host source to find out.
+            match value.get("capabilities") {
+                Some(capabilities) if !capabilities.is_null() && !capabilities.is_array() => format!(
+                    "Plugin '{}' initialize result has capabilities: {}; expected an array of capability names",
+                    self.plugin.manifest.id, capabilities
+                ),
+                _ => format!("Failed to decode plugin '{}' result: {error}", self.plugin.manifest.id),
+            }
+        })?;
         if handshake.protocol_version != SUPPORTED_PLUGIN_PROTOCOL_VERSION {
             return Err(format!(
                 "Plugin selected protocol version {}, expected {}",
@@ -1347,6 +1374,116 @@ mod tests {
                 .unwrap_err(),
             "boom"
         );
+    }
+
+    #[test]
+    fn handshake_accepts_null_capabilities_as_empty() {
+        let handshake: PluginHandshake = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "capabilities": null,
+            "plugin": { "id": "sample.sidecar", "version": "1.0.0" }
+        }))
+        .unwrap();
+        assert!(handshake.capabilities.is_empty());
+    }
+
+    /// A sidecar that answers `plugin/initialize` with `capabilities: null`
+    /// (what a Go plugin with a nil slice encodes) must still initialize,
+    /// with an empty capability list.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialize_accepts_null_capabilities_as_empty() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":null,"plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.sidecar",
+            "name": "Sample Sidecar",
+            "version": "1.0.0",
+            "publisher": "dbx",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": {
+                "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }
+            }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let session = PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default())
+            .await
+            .expect("null capabilities should initialize as empty");
+        assert!(session.handshake().await.unwrap().capabilities.is_empty());
+        session.shutdown().await.unwrap();
+    }
+
+    /// A non-array `capabilities` value must fail initialization with an
+    /// error naming the field and the plugin, not a bare serde type error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn initialize_names_capabilities_field_when_not_an_array() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("plugin.sh");
+        std::fs::write(
+            &executable,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":"events","plugin":{"id":"sample.sidecar","version":"1.0.0"}}}\n' "$initialize_id"
+sleep 30
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "id": "sample.sidecar",
+            "name": "Sample Sidecar",
+            "version": "1.0.0",
+            "publisher": "dbx",
+            "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+            "entrypoints": {
+                "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                }
+            }
+        }))
+        .unwrap();
+        let plugin = InstalledPlugin::new(manifest, dir.path().to_path_buf(), "0.5.67");
+        let error = match PluginSidecarSession::start(plugin, "0.5.67", PluginRuntimeEnv::default()).await {
+            Ok(session) => {
+                session.shutdown().await.unwrap();
+                panic!("non-array capabilities should fail initialization")
+            }
+            Err(error) => error,
+        };
+        assert!(error.contains("capabilities"), "unexpected error: {error}");
+        assert!(error.contains("sample.sidecar"), "unexpected error: {error}");
     }
 
     #[test]
