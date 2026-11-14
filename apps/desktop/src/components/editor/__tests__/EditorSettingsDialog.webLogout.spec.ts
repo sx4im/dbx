@@ -134,4 +134,39 @@ describe("EditorSettingsDialog web logout", () => {
     logoutBtn?.click();
     expect(logoutEmitted).toBe(true);
   });
+
+  it("gives the change-password fields spec autocomplete tokens so browsers do not autofill them", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+
+    const app = createApp(
+      defineComponent({
+        setup() {
+          return () =>
+            h(EditorSettingsDialog, {
+              variant: "page",
+              initialTab: "security" as any,
+            });
+        },
+      }),
+    );
+    app.use(createPinia());
+    app.mount(host);
+    mountedApps.push({ app, host });
+
+    await nextTick();
+    await Promise.resolve();
+
+    const securitySection = host.querySelector('[data-settings-search-id="security"]');
+    expect(securitySection).not.toBeNull();
+    const passwordInputs = Array.from(securitySection!.querySelectorAll('input[type="password"]'));
+    expect(passwordInputs).toHaveLength(3);
+    // Browsers ignore autocomplete="off" on password fields, so the old password
+    // must use current-password and the new ones new-password (see #14946).
+    expect(passwordInputs.map((input) => input.getAttribute("autocomplete"))).toEqual([
+      "current-password",
+      "new-password",
+      "new-password",
+    ]);
+  });
 });
