@@ -61,6 +61,39 @@ func TestServerInitializesAndDispatches(t *testing.T) {
 	}
 }
 
+func TestServerInitializesNilCapabilitiesAsEmptyList(t *testing.T) {
+	input := bytes.NewBufferString(
+		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"plugin/initialize\",\"params\":{\"host\":{\"protocolVersions\":[1]}}}\n",
+	)
+	var output bytes.Buffer
+	// Capabilities intentionally left nil: a plugin that declares no
+	// capabilities must not advertise JSON null, which the host rejects
+	// ("invalid type null, expected a sequence") and fails the whole
+	// plugin initialization.
+	server := NewServer(
+		Metadata{ID: "sample.plugin", Version: "1.0.0"},
+		HandlerFunc(func(_ RequestContext, _ string, _ json.RawMessage, _ *Emitter) (any, *PluginError) {
+			return nil, MethodNotFound("unused")
+		}),
+	).WithIO(input, &output, &bytes.Buffer{})
+	if err := server.Serve(); err != nil {
+		t.Fatal(err)
+	}
+	line := bytes.TrimSpace(output.Bytes())
+	if !bytes.Contains(line, []byte(`"capabilities":[]`)) {
+		t.Fatalf("expected capabilities to encode as [], got %s", line)
+	}
+	var response map[string]any
+	if err := json.Unmarshal(line, &response); err != nil {
+		t.Fatal(err)
+	}
+	initialize := response["result"].(map[string]any)
+	capabilities, ok := initialize["capabilities"].([]any)
+	if !ok || len(capabilities) != 0 {
+		t.Fatalf("expected empty capabilities list, got %#v", initialize["capabilities"])
+	}
+}
+
 func TestEmitterWritesEvents(t *testing.T) {
 	var output bytes.Buffer
 	emitter := &Emitter{writer: &output, mutex: &sync.Mutex{}}

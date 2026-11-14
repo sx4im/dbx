@@ -100,11 +100,25 @@ impl PluginSessionStatus {
     }
 }
 
+/// Deserialize a field that may be absent or explicitly `null`, treating both
+/// as the type's default. Plain `#[serde(default)]` only covers a missing
+/// field: an explicit `null` still fails with "invalid type: null, expected a
+/// sequence", which used to fail the whole plugin initialization when a
+/// sidecar advertised `"capabilities": null`.
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    let value = Option::<T>::deserialize(deserializer)?;
+    Ok(value.unwrap_or_default())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginHandshake {
     pub protocol_version: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub capabilities: Vec<String>,
     pub plugin: PluginHandshakeIdentity,
 }
@@ -1352,6 +1366,36 @@ mod tests {
     #[test]
     fn trims_protocol_whitespace() {
         assert_eq!(trim_ascii_whitespace(b" \n{}\r\n"), b"{}");
+    }
+
+    #[test]
+    fn handshake_tolerates_null_and_missing_capabilities() {
+        // A sidecar that advertises "capabilities": null (e.g. a nil slice
+        // encoded by a Go SDK) must initialize with no capabilities instead
+        // of failing the whole plugin with "invalid type: null, expected a
+        // sequence".
+        let null_handshake: PluginHandshake = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "capabilities": null,
+            "plugin": { "id": "sample.sidecar", "version": "1.0.0" }
+        }))
+        .unwrap();
+        assert_eq!(null_handshake.capabilities, Vec::<String>::new());
+
+        let missing_handshake: PluginHandshake = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "plugin": { "id": "sample.sidecar", "version": "1.0.0" }
+        }))
+        .unwrap();
+        assert_eq!(missing_handshake.capabilities, Vec::<String>::new());
+
+        let listed_handshake: PluginHandshake = serde_json::from_value(serde_json::json!({
+            "protocolVersion": 1,
+            "capabilities": ["events"],
+            "plugin": { "id": "sample.sidecar", "version": "1.0.0" }
+        }))
+        .unwrap();
+        assert_eq!(listed_handshake.capabilities, vec!["events"]);
     }
 
     /// Installs a sidecar that forwards two questions to the host over string
