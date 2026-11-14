@@ -1287,8 +1287,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PromptActivity,
-        UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
+        decode_response_value, read_limited_line, trim_ascii_whitespace, user_input_result, PluginHandshake,
+        PromptActivity, UserInputSpec, USER_INPUT_DEFAULT_TIMEOUT, USER_INPUT_MAX_OPTIONS, USER_INPUT_MAX_TIMEOUT,
         USER_INPUT_MIN_TIMEOUT,
     };
     use super::{plugin_stderr_hint, PLUGIN_JAVA_TOO_OLD_MESSAGE};
