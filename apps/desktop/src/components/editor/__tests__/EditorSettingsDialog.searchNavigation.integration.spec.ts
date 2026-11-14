@@ -489,4 +489,15 @@ describe("settings search navigation", () => {
     expect(formatterSource).toContain('data-settings-search-id="formatter-json"');
     expect(dialogSource).toContain("searchSettings(settingsSearchEntries.value, settingsSearchQuery.value, currentLocale(), Infinity)");
   });
+
+  it("keeps the global settings search box free of browser autofill (#14946)", () => {
+    const start = dialogSource.indexOf("data-settings-global-search");
+    expect(start).toBeGreaterThan(-1);
+    const block = dialogSource.slice(start, dialogSource.indexOf("/>", start));
+    // A text input keeps the browser's form-history autofill even with
+    // autocomplete="off"; a search input does not get those suggestions, which
+    // is how the other search boxes in the app already behave.
+    expect(block).toContain('type="search"');
+    expect(block).toContain('autocomplete="off"');
+  });
 });

@@ -8268,7 +8268,7 @@ onUnmounted(() => {
               <Input
                 data-settings-global-search
                 v-model="settingsSearchQuery"
-                type="text"
+                type="search"
                 autocomplete="off"
                 role="combobox"
                 :aria-label="t('settings.searchSettings')"
@@ -8276,7 +8276,7 @@ onUnmounted(() => {
                 aria-controls="settings-search-results"
                 :aria-activedescendant="settingsSearchVisible && settingsSearchResults.length ? `settings-search-result-${settingsSearchResults[settingsSearchActiveIndex]?.id}` : undefined"
                 :placeholder="t('settings.searchSettings')"
-                class="h-11 w-full rounded-xl border-border bg-muted/30 pr-10 pl-11 text-sm shadow-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:border-primary focus-visible:bg-background"
+                class="h-11 w-full rounded-xl border-border bg-muted/30 pr-10 pl-11 text-sm shadow-none hover:bg-muted/40 focus-visible:ring-2 focus-visible:ring-inset focus-visible:border-primary focus-visible:bg-background [&::-webkit-search-cancel-button]:hidden"
                 @focus="settingsSearchOpen = Boolean(settingsSearchQuery.trim())"
                 @keydown="onSettingsSearchKeydown"
               />
