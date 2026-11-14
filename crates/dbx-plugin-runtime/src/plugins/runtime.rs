@@ -512,9 +512,7 @@ impl PluginSidecarSession {
             permissions: &self.plugin.manifest.permissions,
         };
         let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
-        let value = self
-            .invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT))
-            .await?;
+        let value = self.invoke_value("plugin/initialize", params, None, Some(PLUGIN_REQUEST_TIMEOUT)).await?;
         let handshake: PluginHandshake = serde_json::from_value(value.clone()).map_err(|error| {
             // Name the offending field: a bare serde error ("invalid type:
             // null, expected a sequence") does not say which field failed,
