@@ -7,7 +7,6 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
 import MultiSourceMergeView from "@/components/editor/MultiSourceMergeView.vue";
 import { useToast } from "@/composables/useToast";
@@ -1176,7 +1175,7 @@ watch(
                 <div class="text-xs font-medium">{{ t("multiDbExecute.selectedTargets") }}</div>
                 <Badge variant="secondary">{{ selectedTargets.length }}</Badge>
               </div>
-              <ScrollArea class="min-h-0 flex-1">
+              <div class="min-h-0 flex-1 overflow-y-auto">
                 <div v-if="selectedTargets.length === 0" class="p-5 text-center text-sm text-muted-foreground">{{ t("multiDbExecute.noTargets") }}</div>
                 <div v-else class="space-y-1 p-2">
                   <div v-for="target in selectedTargets" :key="targetKey(target)" class="flex min-w-0 items-start gap-2 rounded-md border px-2 py-1.5">
@@ -1191,7 +1190,7 @@ watch(
                     <Button variant="ghost" size="icon-sm" :disabled="isExecuting" :title="t('multiDbExecute.removeTarget')" @click="removeSelected(target)"><X class="h-3.5 w-3.5" /></Button>
                   </div>
                 </div>
-              </ScrollArea>
+              </div>
             </div>
           </div>
         </div>

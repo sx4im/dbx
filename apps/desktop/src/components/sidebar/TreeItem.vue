@@ -1285,7 +1285,13 @@ function updateTreeDragTarget(event: MouseEvent) {
   // While the list is display-sorted, the underlying manual order used for
   // before/after positioning is invisible, so only moving into a different
   // group (a display-order-independent operation) is a coherent drop.
-  if (props.moveToGroupOnly && dragState.dropPosition !== "inside") {
+  // Exception: a before/after drop on a root-level row moves the dragged node
+  // out of its parent group into the root list, a parentage change, not a
+  // hidden reorder. Without it, a folder dragged into another folder while
+  // sorted can never be dragged back out, because every root row clears the
+  // drop. The stored manual order still applies when the sort returns to
+  // manual, so an invisible root reorder is harmless.
+  if (props.moveToGroupOnly && dragState.dropPosition !== "inside" && props.depth !== 0) {
     clearTarget(activeNode.value.id);
   }
 }

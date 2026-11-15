@@ -182,3 +182,12 @@ describe("manual multi-database dialog", () => {
     expect(document.body.textContent).toContain("multiDbExecute.rolledBack");
   });
 });
+
+describe("selected targets list", () => {
+  it("renders every selected target when the list holds a full page of targets", async () => {
+    const targets = Array.from({ length: 15 }, (_, index) => ({ connectionId: "test", database: `db-${index}` }));
+    mountDialog({ open: true, sql: "SELECT 1", sourceTabId: "source", databaseType: "oceanbase-oracle", initialTargets: targets, launchId: 1, executeTarget: vi.fn() });
+    await flushPromises();
+    expect(document.querySelectorAll('[title="multiDbExecute.removeTarget"]')).toHaveLength(15);
+  });
+});
