@@ -4064,6 +4064,7 @@ export default withEnglishFallback({
     deleteGroup: "刪除群組",
     deleteSelectedGroups: "刪除選取的 {count} 個群組",
     moveToGroup: "移至群組",
+    moveToTopLevel: "移至頂層",
     moveToNewGroup: "移至新群組",
     ungrouped: "取消群組",
     ungroupedLabel: "預設",

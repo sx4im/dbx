@@ -70,6 +70,7 @@ import {
   expandGroups as expandGroupsOp,
   collapseAllGroups as collapseAllGroupsOp,
   moveConnectionToGroup as moveConnectionToGroupOp,
+  moveConnectionGroupToRoot as moveConnectionGroupToRootOp,
   mergeSidebarLayout,
   reorderEntry as reorderEntryOp,
   reorderEntries as reorderEntriesOp,
@@ -12340,6 +12341,10 @@ export const useConnectionStore = defineStore("connection", () => {
     moveConnectionToGroup(connectionId: string, groupId: string | null) {
       markSidebarLayoutPlacementsEdited([connectionId]);
       updateLayoutAndRebuild(moveConnectionToGroupOp(sidebarLayout.value, connectionId, groupId));
+    },
+    moveConnectionGroupToRoot(groupId: string) {
+      markSidebarLayoutPlacementsEdited([groupId]);
+      updateLayoutAndRebuild(moveConnectionGroupToRootOp(sidebarLayout.value, groupId));
     },
     groupIdForConnection(connectionId: string): string | null {
       return findConnectionLocation(sidebarLayout.value, connectionId)?.groupId ?? null;

@@ -473,6 +473,15 @@ function findEntryParentGroupId(entries: SidebarOrderEntry[], entryId: string, p
   return undefined;
 }
 
+export function moveConnectionGroupToRoot(layout: SidebarLayout, groupId: string): SidebarLayout {
+  if (findEntryParentGroupId(layout.order, groupId) == null) return layout;
+  const order = cloneEntries(layout.order);
+  const removed = removeEntry(order, groupId);
+  if (!removed || removed.type !== "group") return layout;
+  order.push(removed);
+  return { ...layout, order };
+}
+
 export function reorderEntry(layout: SidebarLayout, draggedId: string, targetId: string, position: DropPosition): SidebarLayout {
   if (draggedId === targetId) return layout;
 

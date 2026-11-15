@@ -3193,6 +3193,7 @@ export default withEnglishFallback({
     deleteGroup: "Qrupu sil",
     deleteSelectedGroups: "Seçilmiş {count} qrupu sil",
     moveToGroup: "Qrupa köçür",
+    moveToTopLevel: "Ən üst səviyyəyə köçür",
     moveToNewGroup: "Yeni qrupa köçür",
     ungrouped: "Qruplaşdırılmayıb",
     ungroupedLabel: "Standart",

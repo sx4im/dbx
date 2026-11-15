@@ -4042,6 +4042,7 @@ export default withEnglishFallback({
     deleteGroup: "그룹 삭제",
     deleteSelectedGroups: "선택한 그룹 {count}개 삭제",
     moveToGroup: "그룹으로 이동",
+    moveToTopLevel: "최상위로 이동",
     moveToNewGroup: "새 그룹으로 이동",
     ungrouped: "그룹 없음",
     ungroupedLabel: "기본",

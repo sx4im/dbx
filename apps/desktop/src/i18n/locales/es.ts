@@ -4250,6 +4250,7 @@ export default withEnglishFallback({
     deleteGroup: "Eliminar grupo",
     deleteSelectedGroups: "Eliminar {count} grupos seleccionados",
     moveToGroup: "Mover al grupo",
+    moveToTopLevel: "Mover al nivel superior",
     moveToNewGroup: "Mover a nuevo grupo",
     ungrouped: "Sin grupo",
     ungroupedLabel: "Predeterminado",

@@ -4083,6 +4083,7 @@ export default withEnglishFallback({
     deleteGroup: "Excluir Grupo",
     deleteSelectedGroups: "Excluir {count} grupos selecionados",
     moveToGroup: "Mover para Grupo",
+    moveToTopLevel: "Mover para o nível superior",
     moveToNewGroup: "Mover para Novo Grupo",
     ungrouped: "Sem grupo",
     ungroupedLabel: "Padrão",

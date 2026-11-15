@@ -57,6 +57,7 @@ import {
   PencilRuler,
   Search,
   FolderInput,
+  FolderOutput,
   FolderPlus,
   Eraser,
   Scissors,
@@ -649,6 +650,7 @@ const {
   confirmDeleteGroup,
   deletingConnectionGroups,
   moveToGroup,
+  moveActiveGroupToTopLevel,
   createGroupAndMoveConnection,
 } = useSidebarConnectionMutationRuntime({
   activeNode,
@@ -7802,6 +7804,14 @@ function buildConnectionSidebarMenu(context: SidebarMenuFactoryContext): boolean
       icon: Pencil,
       shortcut: shortcutRename,
     });
+    if ((availableGroups.value.find((group) => group.id === node.id)?.depth ?? 0) > 0) {
+      items.push({
+        sidebarActionId: "connectionGroup.moveToTopLevel",
+        label: t("connectionGroup.moveToTopLevel"),
+        action: moveActiveGroupToTopLevel,
+        icon: FolderOutput,
+      });
+    }
     items.push({ label: "", separator: true });
     items.push({
       label: connectionGroupDeleteMenuLabel(),

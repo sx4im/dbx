@@ -3168,6 +3168,7 @@ export default withEnglishFallback({
     deleteGroup: "Grubu Sil",
     deleteSelectedGroups: "Seçili {count} Grubu Sil",
     moveToGroup: "Gruba Taşı",
+    moveToTopLevel: "En üst düzeye taşı",
     moveToNewGroup: "Yeni Gruba Taşı",
     ungrouped: "Gruplanmamış",
     ungroupedLabel: "Varsayılan",

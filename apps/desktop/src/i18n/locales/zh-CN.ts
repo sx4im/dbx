@@ -4462,6 +4462,7 @@ export default withEnglishFallback({
     deleteGroup: "删除分组",
     deleteSelectedGroups: "删除选中的 {count} 个分组",
     moveToGroup: "移至分组",
+    moveToTopLevel: "移至顶层",
     moveToNewGroup: "移至新分组",
     ungrouped: "取消分组",
     ungroupedLabel: "默认",

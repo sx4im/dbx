@@ -182,3 +182,20 @@ describe("manual multi-database dialog", () => {
     expect(document.body.textContent).toContain("multiDbExecute.rolledBack");
   });
 });
+
+describe("multi-database selection grid", () => {
+  it("constrains the selection grid rows so the selected-targets list can scroll to its last row", async () => {
+    const connection = { id: "connection-123", name: "Staging", db_type: "mysql" as DatabaseType, host: "example.invalid", port: 0, username: "", password: "" };
+    selectionConnections = [connection];
+    selectionDatabases = Array.from({ length: 15 }, (_, index) => `db${index + 1}`);
+    const initialTargets = selectionDatabases.map((database) => ({ connectionId: "connection-123", database }));
+    mountDialog({ open: true, sql: "SELECT 1", sourceTabId: "source", databaseType: "mysql", initialTargets, launchId: 1, executeTarget: vi.fn() });
+    await flushPromises();
+    expect(document.querySelectorAll('[title="multiDbExecute.removeTarget"]')).toHaveLength(15);
+
+    const header = [...document.querySelectorAll("div")].find((candidate) => candidate.textContent?.trim() === "multiDbExecute.selectedTargets");
+    expect(header).toBeDefined();
+    const grid = header!.closest("div.grid");
+    expect(grid?.className).toContain("auto-rows-[minmax(0,1fr)]");
+  });
+});

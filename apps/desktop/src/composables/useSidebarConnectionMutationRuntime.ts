@@ -489,6 +489,11 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     for (const target of targets) releaseConnectionFromMultiSelection(connectionStore, target.connectionId);
   }
 
+  function moveActiveGroupToTopLevel() {
+    if (activeNode.value.type !== "connection-group") return;
+    connectionStore.moveConnectionGroupToRoot(activeNode.value.id);
+  }
+
   function createGroupAndMoveConnection(name: string): boolean {
     const node = sidebarFormTarget.value ?? activeNode.value;
     const normalizedName = name.trim();
@@ -557,6 +562,7 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
     confirmDeleteGroup,
     deletingConnectionGroups,
     moveToGroup,
+    moveActiveGroupToTopLevel,
     createGroupAndMoveConnection,
   };
 }

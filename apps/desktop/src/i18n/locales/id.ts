@@ -3515,6 +3515,7 @@ export default withEnglishFallback({
     deleteGroup: "Hapus Grup",
     deleteSelectedGroups: "Hapus {count} Grup Terpilih",
     moveToGroup: "Pindahkan ke Grup",
+    moveToTopLevel: "Pindah ke Tingkat Atas",
     moveToNewGroup: "Pindahkan ke Grup Baru",
     ungrouped: "Tanpa Grup",
     ungroupedLabel: "Bawaan",

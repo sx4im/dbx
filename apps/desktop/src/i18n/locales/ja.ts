@@ -4107,6 +4107,7 @@ export default withEnglishFallback({
     deleteGroup: "グループを削除",
     deleteSelectedGroups: "選択した {count} 個のグループを削除",
     moveToGroup: "グループに移動",
+    moveToTopLevel: "最上位へ移動",
     moveToNewGroup: "新しいグループに移動",
     ungrouped: "グループなし",
     ungroupedLabel: "デフォルト",

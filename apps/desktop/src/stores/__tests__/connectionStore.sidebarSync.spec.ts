@@ -661,3 +661,73 @@ describe("connectionStore deleting a connection while the layout changes", () =>
     expect(store.sidebarLayout.order).toEqual(original.order);
   });
 });
+
+describe("connectionStore moving a connection group to the top level", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn(() => null),
+      setItem: vi.fn(),
+      removeItem: vi.fn(),
+    });
+    loadSidebarLayout = vi.fn().mockResolvedValue(null);
+    saveSidebarLayout = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      loadEditorSettings: vi.fn().mockResolvedValue(null),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveEditorSettings: vi.fn().mockResolvedValue(undefined),
+      loadSidebarLayout,
+      saveSidebarLayout,
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      deleteTableVGroupsForConnection: vi.fn().mockResolvedValue(undefined),
+    }));
+    setActivePinia(createPinia());
+  });
+
+  function nested(): SidebarLayout {
+    return {
+      groups: [
+        { id: "parent", name: "Parent", collapsed: false },
+        { id: "child", name: "Child", collapsed: false },
+      ],
+      order: [
+        { type: "group", id: "parent", children: [{ type: "group", id: "child", children: [{ type: "connection", id: "a" }] }] },
+        { type: "connection", id: "b" },
+      ],
+    };
+  }
+
+  async function storeWithNestedLayout() {
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [connection("a"), connection("b")];
+    store.sidebarLayout = nested();
+    return store;
+  }
+
+  it("moves a nested group to the top level, keeping its connections inside it", async () => {
+    const store = await storeWithNestedLayout();
+    store.moveConnectionGroupToRoot("child");
+    expect(store.sidebarLayout.order).toEqual([
+      { type: "group", id: "parent", children: [] },
+      { type: "connection", id: "b" },
+      { type: "group", id: "child", children: [{ type: "connection", id: "a" }] },
+    ]);
+    expect(store.groupIdForConnection("a")).toBe("child");
+  });
+
+  it("leaves a group that is already at the top level in place", async () => {
+    const store = await storeWithNestedLayout();
+    const before = JSON.parse(JSON.stringify(store.sidebarLayout));
+    store.moveConnectionGroupToRoot("parent");
+    expect(store.sidebarLayout).toEqual(before);
+  });
+
+  it("ignores an unknown group id", async () => {
+    const store = await storeWithNestedLayout();
+    const before = JSON.parse(JSON.stringify(store.sidebarLayout));
+    store.moveConnectionGroupToRoot("missing");
+    expect(store.sidebarLayout).toEqual(before);
+  });
+});

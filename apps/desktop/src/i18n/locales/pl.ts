@@ -3566,6 +3566,7 @@ export default withEnglishFallback({
     deleteGroup: "Usuń grupę",
     deleteSelectedGroups: "Usuń zaznaczone grupy ({count})",
     moveToGroup: "Przenieś do grupy",
+    moveToTopLevel: "Przenieś na najwyższy poziom",
     moveToNewGroup: "Przenieś do nowej grupy",
     ungrouped: "Bez grupy",
     ungroupedLabel: "Domyślne",

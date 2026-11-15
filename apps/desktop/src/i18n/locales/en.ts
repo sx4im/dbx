@@ -4536,6 +4536,7 @@ export default {
     deleteGroup: "Delete Group",
     deleteSelectedGroups: "Delete {count} Selected Groups",
     moveToGroup: "Move to Group",
+    moveToTopLevel: "Move to Top Level",
     moveToNewGroup: "Move to New Group",
     ungrouped: "Ungrouped",
     ungroupedLabel: "Default",
