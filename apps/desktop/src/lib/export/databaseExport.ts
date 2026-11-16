@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api.ts";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
 import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { inferJdbcDialect, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
 import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
@@ -97,6 +98,38 @@ export interface AllDatabaseExportPlanItem {
 export function filterExportableSchemas(schemas: readonly string[], databaseType?: DatabaseType): string[] {
   if (databaseType !== "xugu") return [...schemas];
   return schemas.filter((schema) => !isXuguSyntheticScope(schema));
+}
+
+export interface ResolveExportSchemaInput {
+  connection?: JdbcDialectConnection;
+  database: string;
+  schemas: readonly string[];
+  preferredSchema?: string;
+}
+
+export interface ResolveExportSchemaResult {
+  schemas: string[];
+  schema: string;
+}
+
+/**
+ * Resolve the schema list and the initially selected schema for the export dialog.
+ *
+ * Generic JDBC connections to MySQL report no schemas: MySQL organizes objects
+ * by catalog (the database), not by schema, and the driver's getSchemas() call
+ * returns nothing. Using the database itself as the schema keeps the table
+ * list and the Export button working, mirroring what native MySQL connections
+ * already do. Other dialects keep the empty selection so the dialog still
+ * waits for a real schema.
+ */
+export function resolveExportSchema(options: ResolveExportSchemaInput): ResolveExportSchemaResult {
+  const schemas = filterExportableSchemas(options.schemas, options.connection?.db_type);
+  if (schemas.length > 0) {
+    const schema = options.preferredSchema && schemas.includes(options.preferredSchema) ? options.preferredSchema : schemas.includes("public") ? "public" : (schemas[0] ?? "");
+    return { schemas, schema };
+  }
+  const schema = options.connection?.db_type === "jdbc" && inferJdbcDialect(options.connection) === "mysql" ? options.database : "";
+  return { schemas, schema };
 }
 
 export interface DatabaseBackupSnapshotOptions {

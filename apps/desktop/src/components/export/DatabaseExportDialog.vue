@@ -13,7 +13,7 @@ import * as api from "@/lib/backend/api";
 import type { DatabaseExportSelectedObject, ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, resolveExportSchema, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
@@ -387,10 +387,14 @@ async function loadSchemas(preferredSchema = "") {
     return;
   }
 
-  const schemaList = filterExportableSchemas(await api.listSchemas(connectionId.value, database.value), config?.db_type);
-  const selected = preferredSchema && schemaList.includes(preferredSchema) ? preferredSchema : schemaList.includes("public") ? "public" : (schemaList[0] ?? "");
-  schemas.value = schemaList;
-  schema.value = selected;
+  const resolved = resolveExportSchema({
+    connection: config ?? undefined,
+    database: database.value,
+    schemas: await api.listSchemas(connectionId.value, database.value),
+    preferredSchema,
+  });
+  schemas.value = resolved.schemas;
+  schema.value = resolved.schema;
 }
 
 async function loadTables(preferredTable = "", preferredTables: string[] = [], preferredObjects: DatabaseExportSelectedObject[] = []) {
