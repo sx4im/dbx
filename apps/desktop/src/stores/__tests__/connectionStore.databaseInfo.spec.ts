@@ -240,6 +240,140 @@ describe("connectionStore database info", () => {
     await vi.waitFor(() => expect(store.getConfig(config.id)?.database_info?.productVersion).toBe("8.0.34"));
   });
 
+  it("refreshes the database list after a delayed MySQL server version change", async () => {
+    const config: ConnectionConfig = {
+      ...mysqlConnection(),
+      database_info: { productName: "MySQL", productVersion: "5.7.26" },
+    };
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    let useNewDatabases = false;
+    const listDatabases = vi.fn().mockImplementation(async () => [{ name: useNewDatabases ? "current_db" : "legacy_db" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listObjects: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo: vi.fn().mockImplementation(async () => {
+        useNewDatabases = true;
+      }),
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database").map((node) => node.label)).toEqual(["legacy_db"]);
+
+    // The server behind the same connection was swapped (5.7.26 -> 8.0.12) while
+    // version detection was still pending (#15034).
+    resolveDatabaseInfo({ productName: "MySQL", productVersion: "8.0.12" });
+
+    await vi.waitFor(() => {
+      expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database").map((node) => node.label)).toEqual(["current_db"]);
+    });
+    expect(listDatabases).toHaveBeenCalledTimes(2);
+  }, 30_000);
+
+  it("does not refresh the database list when the detected MySQL version is unchanged", async () => {
+    const config: ConnectionConfig = {
+      ...mysqlConnection(),
+      database_info: { productName: "MySQL", productVersion: "5.7.26" },
+    };
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion: string; serverComment?: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion: string; serverComment?: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "legacy_db" }]);
+    const saveConnectionDatabaseInfo = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listObjects: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database").map((node) => node.label)).toEqual(["legacy_db"]);
+
+    // Only a server comment arrived; the version itself did not change.
+    resolveDatabaseInfo({ productName: "MySQL", productVersion: "5.7.26", serverComment: "MySQL Community Server - GPL" });
+    await vi.waitFor(() => expect(saveConnectionDatabaseInfo).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it("does not refresh the database list on first MySQL version detection", async () => {
+    const config = mysqlConnection();
+    let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
+    const databaseInfo = new Promise<{ productName: string; productVersion: string }>((resolve) => {
+      resolveDatabaseInfo = resolve;
+    });
+    const listDatabases = vi.fn().mockResolvedValue([{ name: "current_db" }]);
+    const saveConnectionDatabaseInfo = vi.fn().mockResolvedValue(undefined);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      connectDb: vi.fn().mockResolvedValue(config.id),
+      connectionDatabaseInfo: vi.fn(() => databaseInfo),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue(undefined),
+      deleteSchemaCachePrefix: vi.fn().mockResolvedValue(undefined),
+      listDatabases,
+      listObjects: vi.fn().mockResolvedValue([]),
+      loadSchemaCache: vi.fn().mockResolvedValue(null),
+      saveConnectionDatabaseInfo,
+      saveConnections: vi.fn().mockResolvedValue(undefined),
+      saveSchemaCache: vi.fn().mockResolvedValue(undefined),
+      saveSidebarLayout: vi.fn().mockResolvedValue(undefined),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useConnectionStore();
+    useSettingsStore().editorSettings.sidebarObjectDisplay = "simple";
+    await store.addConnection(config);
+    await store.connect(config);
+    await store.loadDatabases(config.id, { force: true });
+    expect(store.treeNodes[0]?.children?.filter((node) => node.type === "database").map((node) => node.label)).toEqual(["current_db"]);
+
+    // No previously detected version exists, so there is no change to react to.
+    resolveDatabaseInfo({ productName: "MySQL", productVersion: "8.0.12" });
+    await vi.waitFor(() => expect(saveConnectionDatabaseInfo).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(listDatabases).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
   it("refreshes physical table metadata after delayed ShardingSphere detection", async () => {
     const config = mysqlConnection();
     let resolveDatabaseInfo!: (value: { productName: string; productVersion: string }) => void;
