@@ -2923,13 +2923,14 @@ pub fn format_grid_sql_literal_with_spatial(
         return if value { "TRUE" } else { "FALSE" }.to_string();
     }
     if is_kingbase_bit_literal_column(database_type, column_info) {
+        let width = column_info.and_then(|column| bit_column_width(&column.data_type));
         if let Some(number) = value.as_number() {
-            if let Some(literal) = format_kingbase_bit_literal_text(&number.to_string()) {
+            if let Some(literal) = format_kingbase_bit_literal_text(&number.to_string(), width) {
                 return literal;
             }
         }
         if let Some(text) = value.as_str() {
-            if let Some(literal) = format_kingbase_bit_literal_text(text) {
+            if let Some(literal) = format_kingbase_bit_literal_text(text, width) {
                 return literal;
             }
         }
@@ -2938,7 +2939,19 @@ pub fn format_grid_sql_literal_with_spatial(
         if let Some(number) = value.as_number() {
             return number.to_string();
         }
-        if let Some(text) = value.as_str().and_then(format_mysql_bit_literal_text) {
+        let width = column_info.and_then(|column| bit_column_width(&column.data_type));
+        if let Some(text) = value.as_str().and_then(|text| format_mysql_bit_literal_text(text, width)) {
+            return text;
+        }
+    }
+    // PostgreSQL bit(n) columns reject over-wide literals outright
+    // (`bit string length 8 does not match type bit(1)`), so fit the
+    // string to the declared width instead of quoting it verbatim.
+    if database_type == Some(DatabaseType::Postgres)
+        && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
+    {
+        let width = column_info.and_then(|column| bit_column_width(&column.data_type));
+        if let Some(text) = value.as_str().and_then(|text| format_postgres_bit_literal_text(text, width)) {
             return text;
         }
     }
@@ -3432,6 +3445,54 @@ fn is_bit_column_type(data_type: &str) -> bool {
     })
 }
 
+/// Declared width of a `bit(n)` column, e.g. `Some(1)` for `bit(1)`.
+/// Returns `None` for a bare `bit`, `bit varying`, or SQL Server's `bitn`,
+/// where no width applies.
+fn bit_column_width(data_type: &str) -> Option<usize> {
+    let lower = data_type.to_ascii_lowercase();
+    let rest = lower.split_once("bit")?.1.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let digits = rest.split_once(')')?.0.trim();
+    if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<usize>().ok().filter(|width| *width > 0)
+}
+
+/// Fit a bit string to a declared column width: keep the rightmost `width`
+/// bits, left-pad with `0` when shorter. An over-wide value is what made
+/// the database reject the update, and the stored value keeps the
+/// low-order bits.
+fn fit_bit_string_to_width(bits: &str, width: usize) -> String {
+    if bits.len() > width {
+        bits[bits.len() - width..].to_string()
+    } else if bits.len() < width {
+        format!("{}{bits}", "0".repeat(width - bits.len()))
+    } else {
+        bits.to_string()
+    }
+}
+
+fn format_postgres_bit_literal_text(text: &str, width: Option<usize>) -> Option<String> {
+    let trimmed = text.trim();
+    let bits = if !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
+        trimmed
+    } else if trimmed.len() > 3 && trimmed.to_ascii_lowercase().starts_with("b'") && trimmed.ends_with('\'') {
+        let bits = &trimmed[2..trimmed.len() - 1];
+        if bits.is_empty() || !bits.chars().all(|ch| matches!(ch, '0' | '1')) {
+            return None;
+        }
+        bits
+    } else {
+        return None;
+    };
+    let fitted = match width {
+        Some(width) => fit_bit_string_to_width(bits, width),
+        None => bits.to_string(),
+    };
+    Some(format!("'{fitted}'"))
+}
+
 fn is_mysql_geometry_literal_database(database_type: Option<DatabaseType>) -> bool {
     matches!(
         database_type,
@@ -3639,7 +3700,7 @@ fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColu
     None
 }
 
-fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
+fn format_mysql_bit_literal_text(text: &str, width: Option<usize>) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("true") {
         return Some("1".to_string());
@@ -3651,7 +3712,11 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
         return Some(if trimmed.len() == 1 {
             trimmed.to_string()
         } else if trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
-            format!("b'{trimmed}'")
+            let bits = match width {
+                Some(width) => fit_bit_string_to_width(trimmed, width),
+                None => trimmed.to_string(),
+            };
+            format!("b'{bits}'")
         } else {
             trimmed.to_string()
         });
@@ -3660,13 +3725,17 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
     if lower.starts_with("b'") && trimmed.ends_with('\'') {
         let bits = &trimmed[2..trimmed.len() - 1];
         if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
+            let bits = match width {
+                Some(width) => fit_bit_string_to_width(bits, width),
+                None => bits.to_string(),
+            };
             return Some(format!("b'{bits}'"));
         }
     }
     None
 }
 
-fn format_kingbase_bit_literal_text(text: &str) -> Option<String> {
+fn format_kingbase_bit_literal_text(text: &str, width: Option<usize>) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("true") {
         return Some("b'1'".to_string());
@@ -3675,12 +3744,20 @@ fn format_kingbase_bit_literal_text(text: &str) -> Option<String> {
         return Some("b'0'".to_string());
     }
     if !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
-        return Some(format!("b'{trimmed}'"));
+        let bits = match width {
+            Some(width) => fit_bit_string_to_width(trimmed, width),
+            None => trimmed.to_string(),
+        };
+        return Some(format!("b'{bits}'"));
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("b'") && trimmed.ends_with('\'') {
         let bits = &trimmed[2..trimmed.len() - 1];
         if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
+            let bits = match width {
+                Some(width) => fit_bit_string_to_width(bits, width),
+                None => bits.to_string(),
+            };
             return Some(format!("b'{bits}'"));
         }
     }
@@ -11464,6 +11541,27 @@ mod tests {
             "b'10101010'"
         );
         assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+    }
+
+    #[test]
+    fn bit_string_literals_fit_the_declared_column_width() {
+        let mysql_bit1 = column("flag", "bit(1)", true, None);
+        let mysql_bit8 = column("flags", "bit(8)", true, None);
+        let pg_bit1 = column("flag", "bit(1)", true, None);
+        let pg_bit8 = column("flags", "bit(8)", true, None);
+
+        assert_eq!(format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Postgres), Some(&pg_bit1)), "'1'");
+        assert_eq!(format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Mysql), Some(&mysql_bit1)), "b'1'");
+        assert_eq!(format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Mysql), Some(&mysql_bit1)), "b'0'");
+        assert_eq!(
+            format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Mysql), Some(&mysql_bit8)),
+            "b'10101010'"
+        );
+        assert_eq!(format_grid_sql_literal(&json!("1"), Some(DatabaseType::Postgres), Some(&pg_bit8)), "'00000001'");
+        assert_eq!(
+            format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Postgres), Some(&pg_bit8)),
+            "'10101010'"
+        );
     }
 
     #[test]
