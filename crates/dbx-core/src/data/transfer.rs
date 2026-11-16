@@ -3961,6 +3961,12 @@ pub fn escape_value_typed(val: &serde_json::Value, db_type: &DatabaseType, colum
         let json = val.as_str().map(str::to_string).unwrap_or_else(|| val.to_string());
         return format!("JSON {}", quote_string_literal(&json));
     }
+    // PostgreSQL rejects over-width quoted bit strings (#15061) and bare
+    // integers / TRUE / FALSE for bit columns; MySQL-family bit strings
+    // are trimmed to the declared width the same way.
+    if let Some(literal) = format_postgres_bit_sql_literal(val, db_type, column_type) {
+        return literal;
+    }
     match val {
         serde_json::Value::Null => "NULL".to_string(),
         serde_json::Value::Bool(b) => match db_type {
@@ -4130,6 +4136,100 @@ fn is_mysql_bit_type(column_type: &str) -> bool {
     let trimmed = column_type.trim();
     let lower = trimmed.to_ascii_lowercase();
     lower == "bit" || lower.starts_with("bit(") || lower.starts_with("bit ")
+}
+
+/// Declared width of a `bit(n)` / `bit varying(n)` column, plus whether it
+/// is the varying form. Returns `None` for a bare `bit` / `bit varying`
+/// (no width to normalize against) and for non-bit types. An optional
+/// single schema qualifier (`pg_catalog.bit(n)`) is accepted.
+fn postgres_bit_column_width(column_type: &str) -> Option<(usize, bool)> {
+    let lower = column_type.trim().to_ascii_lowercase();
+    let name = lower.rsplit('.').next().unwrap_or(&lower).trim();
+    let (rest, varying) = match name.strip_prefix("bit varying") {
+        Some(rest) => (rest, true),
+        None => (name.strip_prefix("bit")?, false),
+    };
+    let rest = rest.trim();
+    let width_text = rest.strip_prefix('(')?.strip_suffix(')')?;
+    let width: usize = width_text.trim().parse().ok()?;
+    if width == 0 {
+        return None;
+    }
+    Some((width, varying))
+}
+
+/// Normalizes a bit string to the declared width: over-width values keep
+/// their rightmost bits, short strings against fixed `bit(n)` are
+/// zero-padded (PostgreSQL requires exactly n bits), and short strings
+/// against `bit varying(n)` stay short.
+fn normalize_postgres_bit_string(bits: &str, width: usize, varying: bool) -> String {
+    if bits.len() > width {
+        bits[bits.len() - width..].to_string()
+    } else if !varying && bits.len() < width {
+        format!("{}{}", "0".repeat(width - bits.len()), bits)
+    } else {
+        bits.to_string()
+    }
+}
+
+/// Formats a value for a PostgreSQL-family (`Postgres`, `Kingbase`,
+/// `OpenGauss`) `bit(n)` / `bit varying(n)` column as a `B'...'` literal
+/// normalized to the declared width, or for a MySQL-family bit column as a
+/// trimmed `b'...'` literal (#15061: an over-width quoted bit string is
+/// rejected with "bit string length N does not match type bit(n)").
+/// Returns `None` when the column is not a width-declared bit column or the
+/// value is not a bit value, so the caller falls through to the existing
+/// formatting. MySQL numbers and booleans keep their existing arms.
+fn format_postgres_bit_sql_literal(
+    value: &serde_json::Value,
+    db_type: &DatabaseType,
+    column_type: Option<&str>,
+) -> Option<String> {
+    let column_type = column_type?;
+    let (width, varying) = postgres_bit_column_width(column_type)?;
+    if is_postgres_transfer_dialect(db_type) {
+        let bits = match value {
+            serde_json::Value::Bool(b) => {
+                if *b {
+                    "1".to_string()
+                } else {
+                    "0".to_string()
+                }
+            }
+            serde_json::Value::Number(n) => format!("{:b}", n.as_u64()?),
+            serde_json::Value::String(s) => postgres_bit_string_bits(s)?,
+            _ => return None,
+        };
+        Some(format!("B'{}'", normalize_postgres_bit_string(&bits, width, varying)))
+    } else if matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks)
+        && is_mysql_bit_type(column_type)
+    {
+        let bits = match value {
+            serde_json::Value::String(s) => postgres_bit_string_bits(s)?,
+            _ => return None,
+        };
+        let trimmed = if bits.len() > width { &bits[bits.len() - width..] } else { bits.as_str() };
+        Some(format!("b'{trimmed}'"))
+    } else {
+        None
+    }
+}
+
+/// Extracts the bit string from a string value, stripping a `b'...'`
+/// wrapper. Anything that is not all 0/1 is not a bit value.
+fn postgres_bit_string_bits(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let bits = if lower.starts_with("b'") && trimmed.ends_with('\'') && trimmed.len() >= 3 {
+        &trimmed[2..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
+        Some(bits.to_string())
+    } else {
+        None
+    }
 }
 
 fn is_mysql_numeric_string_literal_database(db_type: &DatabaseType) -> bool {
@@ -19721,9 +19821,27 @@ CREATE TABLE "Other"."prefix""Source"."NAME" ("ID" INT);"#;
             escape_value_typed(&json!("2026-10-08 17:30:29"), &DatabaseType::Xugu, Some("DATETIME")),
             "'2026-10-08 17:30:29'"
         );
-        // These SQL literal specializations are intentionally Xugu-only.
-        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Postgres, Some("BIT(8)")), "'10101010'");
+        // PostgreSQL bit literals are normalized to the declared width too
+        // (#15061); only the TIME specialization stays Xugu-only.
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Postgres, Some("BIT(8)")), "B'10101010'");
         assert_eq!(escape_value_typed(&json!("23:59:59.123"), &DatabaseType::Postgres, Some("TIME")), "'23:59:59.123'");
+    }
+
+    #[test]
+    fn postgres_bit_literals_are_normalized_to_declared_width() {
+        // #15061: an 8-bit string against bit(1) was sent as a quoted string,
+        // which PostgreSQL rejects ("bit string length 8 does not match type
+        // bit(1)"). Bit values are normalized to the declared width.
+        assert_eq!(escape_value_typed(&json!("00000001"), &DatabaseType::Postgres, Some("bit(1)")), "B'1'");
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Postgres, Some("bit(1)")), "B'0'");
+        assert_eq!(escape_value_typed(&json!("1"), &DatabaseType::Postgres, Some("bit(8)")), "B'00000001'");
+        assert_eq!(escape_value_typed(&json!("10101010"), &DatabaseType::Postgres, Some("BIT(8)")), "B'10101010'");
+        assert_eq!(escape_value_typed(&json!("1"), &DatabaseType::Postgres, Some("bit varying(8)")), "B'1'");
+        assert_eq!(escape_value_typed(&json!(1), &DatabaseType::Postgres, Some("bit(8)")), "B'00000001'");
+        assert_eq!(escape_value_typed(&json!(true), &DatabaseType::Postgres, Some("bit(1)")), "B'1'");
+        assert_eq!(escape_value_typed(&json!(false), &DatabaseType::Postgres, Some("bit(8)")), "B'00000000'");
+        // MySQL trims the same way; the stored value is unchanged.
+        assert_eq!(escape_value_typed(&json!("00000001"), &DatabaseType::Mysql, Some("bit(1)")), "b'1'");
     }
 
     #[test]
