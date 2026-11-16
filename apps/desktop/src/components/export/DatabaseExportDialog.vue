@@ -13,7 +13,7 @@ import * as api from "@/lib/backend/api";
 import type { DatabaseExportSelectedObject, ExportProgress } from "@/lib/backend/api";
 import { isSchemaAware, isSingleDatabase } from "@/lib/database/databaseFeatureSupport";
 import { databaseOptionsForConnection, fetchNamespaceOptionsForConnection } from "@/composables/useDatabaseOptions";
-import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
+import { buildAllDatabaseExportPlan, filterExportableSchemas, generateDatabaseExportId, jdbcMysqlConnectionUsesDatabaseAsSchema, runDatabaseExportUntilTerminal, runWithDatabaseBackupSnapshot, shouldUseDatabaseBackupSnapshot, type AllDatabaseExportPlanItem } from "@/lib/export/databaseExport";
 import { buildSelectedTablesPayload, databaseExportSelectedObjectsRequest, isDatabaseExportTableSelectionValid, splitDatabaseExportObjectSelection } from "@/lib/export/databaseExportSelection";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import { promptExportSavePath } from "@/lib/export/exportPath";
@@ -381,7 +381,12 @@ async function loadDatabases(connId: string) {
 async function loadSchemas(preferredSchema = "") {
   if (!connectionId.value || !database.value) return;
   const config = store.getConfig(connectionId.value);
-  if (!isSchemaAware(config?.db_type)) {
+  // A generic JDBC connection to a MySQL-family engine has no schema layer
+  // distinct from the database itself, so use the database name as the schema
+  // exactly like a native MySQL connection does (#15068). Enumerating schemas
+  // through listSchemas() comes back empty for MySQL's single-catalog drivers
+  // and would leave the dialog with no table list and a disabled Export button.
+  if (!isSchemaAware(config?.db_type) || jdbcMysqlConnectionUsesDatabaseAsSchema(config)) {
     schemas.value = [];
     schema.value = database.value;
     return;

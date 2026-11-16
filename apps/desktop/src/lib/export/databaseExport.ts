@@ -3,6 +3,7 @@ import * as api from "@/lib/backend/api.ts";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql.ts";
 import { uuid } from "@/lib/common/utils.ts";
 import { SINGLE_DATABASE_TYPES } from "@/lib/database/databaseCapabilitySets";
+import { inferJdbcDialect, type JdbcDialectConnection } from "@/lib/database/jdbcDialect";
 import { isXuguSyntheticScope } from "@/lib/sidebar/xuguPublicSynonyms";
 import type { SqlInsertDialect } from "@/lib/export/sqlInsertMode";
 import { SnapshotCompletionError } from "@/lib/export/snapshotCompletion";
@@ -97,6 +98,22 @@ export interface AllDatabaseExportPlanItem {
 export function filterExportableSchemas(schemas: readonly string[], databaseType?: DatabaseType): string[] {
   if (databaseType !== "xugu") return [...schemas];
   return schemas.filter((schema) => !isXuguSyntheticScope(schema));
+}
+
+/**
+ * Whether a generic JDBC connection treats its database as the schema when
+ * exporting. For a MySQL-family engine the database IS the schema, exactly as
+ * native MySQL connections already assume (they take the non-schema-aware path
+ * and use the database name as the schema). The generic `jdbc.yaml` declares
+ * `schemaAware: true` for every engine behind JDBC, so without this the export
+ * dialog enumerates schemas through `DatabaseMetaData.getSchemas(catalog, …)`,
+ * which comes back empty for MySQL's single-catalog drivers — and the dialog
+ * is left with no schema, no table list and a permanently disabled Export
+ * button (#15068). Other JDBC dialects keep the schema enumeration path.
+ */
+export function jdbcMysqlConnectionUsesDatabaseAsSchema(connection: JdbcDialectConnection | undefined): boolean {
+  if (!connection || connection.db_type !== "jdbc") return false;
+  return inferJdbcDialect(connection) === "mysql";
 }
 
 export interface DatabaseBackupSnapshotOptions {
