@@ -4165,6 +4165,21 @@ mod tests {
     }
 
     #[test]
+    fn postgres_url_encodes_hash_in_password() {
+        // Regression test for #15049: a PostgreSQL password containing '#'
+        // must be percent-encoded in the connection URL, otherwise
+        // tokio-postgres rejects the URL as an invalid connection string
+        // ('#' starts the fragment).
+        let mut config = mysql_config("user", "Abc#123!def*", Some("mydb"));
+        config.db_type = DatabaseType::Postgres;
+        config.port = 5432;
+
+        let url = config.connection_url();
+        assert_eq!(url, "postgres://user:Abc%23123%21def%2A@10.1.2.3:5432/mydb?sslmode=prefer");
+        assert!(!url.contains('#'), "raw '#' must not appear in the URL: {url}");
+    }
+
+    #[test]
     fn oceanbase_profile_uses_bare_mysql_connection_options() {
         let mut config = mysql_config("user@tenant#cluster", "secret", None);
         config.driver_profile = Some("oceanbase".to_string());

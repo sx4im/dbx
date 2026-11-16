@@ -12,6 +12,7 @@ use rustls::server::ParsedCertificate;
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::File;
@@ -3482,7 +3483,43 @@ struct PostgresConnectionUrl {
 
 /// Inject TCP keepalive parameters into the PostgreSQL URL (only when the user has not explicitly specified them).
 /// Default parameters shorten half-open connection detection time, suitable for desktop/VPN/NAT environments.
+/// Percent-encode a raw `#` inside the userinfo (username/password) of a
+/// PostgreSQL URL.
+///
+/// `#` starts the fragment, so an unencoded `#` in a password truncates the
+/// URL at the driver parse and tokio-postgres fails with "invalid connection
+/// string" before any authentication happens (#15049). The native builder
+/// percent-encodes credentials, but a URL can also reach the driver verbatim
+/// (pasted connection string, agent-built URL), so repair it here — at the
+/// driver layer — instead of trusting every producer.
+///
+/// Only the userinfo is touched: a `#` at or after the first `/` following
+/// the authority is a genuine fragment delimiter and is left alone, and a
+/// URL without credentials is returned unchanged.
+fn encode_postgres_url_userinfo(url: &str) -> Cow<'_, str> {
+    let Some(scheme_end) = url.find("://") else {
+        return Cow::Borrowed(url);
+    };
+    let after_scheme = &url[scheme_end + 3..];
+    let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return Cow::Borrowed(url);
+    };
+    let userinfo = &authority[..at];
+    if !userinfo.contains('#') {
+        return Cow::Borrowed(url);
+    }
+    let mut repaired = String::with_capacity(url.len() + 4);
+    repaired.push_str(&url[..scheme_end + 3]);
+    repaired.push_str(&userinfo.replace('#', "%23"));
+    repaired.push_str(&after_scheme[at..]);
+    Cow::Owned(repaired)
+}
+
 fn inject_postgres_keepalive_params(url: &str) -> String {
+    let url = encode_postgres_url_userinfo(url);
+    let url = url.as_ref();
     let (base, fragment) = url.split_once('#').map_or((url, ""), |(base, fragment)| (base, fragment));
     let query = base.split('?').nth(1);
     let has_keepalives = query
@@ -3502,6 +3539,8 @@ fn inject_postgres_keepalive_params(url: &str) -> String {
 }
 
 fn postgres_connection_url(url: &str) -> Result<PostgresConnectionUrl, String> {
+    let url = encode_postgres_url_userinfo(url);
+    let url = url.as_ref();
     let Some(query_start) = url.find('?') else {
         let pg_config =
             tokio_postgres::Config::from_str(url).map_err(|e| format!("Invalid PostgreSQL connection URL: {e}"))?;
@@ -14537,6 +14576,36 @@ mod tests {
     }
 
     #[test]
+    fn postgres_connection_url_accepts_hash_in_percent_encoded_password() {
+        // Regression test for #15049: a password containing '#' must reach
+        // the driver percent-encoded; the encoded URL must parse and the
+        // decoded password must round-trip byte-for-byte.
+        let url = "postgres://user:Abc%23123%21def%2A@127.0.0.1:5432/mydb?sslmode=prefer";
+        let parsed = postgres_connection_url(url).unwrap();
+        assert_eq!(parsed.url, url);
+        let config = tokio_postgres::Config::from_str(&parsed.url).unwrap();
+        assert_eq!(config.get_password(), Some(b"Abc#123!def*".as_slice()));
+        assert_eq!(config.get_user(), Some("user"));
+    }
+
+    #[test]
+    fn postgres_connection_url_accepts_raw_hash_in_password() {
+        // #15049: a raw '#' in the password used to make tokio-postgres fail
+        // with "invalid connection string" ('#' starts the fragment). The
+        // driver layer now percent-encodes it in the userinfo, so the URL
+        // parses and the password round-trips byte-for-byte.
+        let url = "postgres://user:Abc#123!def*@127.0.0.1:5432/mydb?sslmode=prefer";
+        let parsed = postgres_connection_url(url).unwrap();
+        assert_eq!(parsed.url, "postgres://user:Abc%23123!def*@127.0.0.1:5432/mydb?sslmode=prefer");
+        let config = tokio_postgres::Config::from_str(&parsed.url).unwrap();
+        assert_eq!(config.get_password(), Some(b"Abc#123!def*".as_slice()));
+        assert_eq!(config.get_user(), Some("user"));
+        // A genuine fragment after the path is still a fragment, not a password.
+        let parsed = postgres_connection_url("postgres://localhost/app?sslmode=require#read-only").unwrap();
+        assert_eq!(parsed.url, "postgres://localhost/app?sslmode=require#read-only");
+    }
+
+    #[test]
     fn postgres_connection_url_extracts_legacy_tls_before_driver_parse() {
         let parsed =
             postgres_connection_url("postgres://localhost/db?sslmode=require&legacy_tls=true&application_name=dbx")
@@ -14687,6 +14756,22 @@ mod tests {
             inject_postgres_keepalive_params(url),
             "postgres://localhost/app?sslmode=require&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_retries=3#read-only"
         );
+    }
+
+    #[test]
+    fn inject_postgres_keepalive_params_encodes_raw_hash_in_password() {
+        // #15049: keepalive injection splits the URL on '#', so a raw '#'
+        // in the password must be encoded first or the URL is mangled
+        // before it ever reaches the driver.
+        let url = "postgres://user:Abc#123!def*@127.0.0.1:5432/mydb?sslmode=prefer";
+        let injected = inject_postgres_keepalive_params(url);
+        assert_eq!(
+            injected,
+            "postgres://user:Abc%23123!def*@127.0.0.1:5432/mydb?sslmode=prefer&keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_retries=3"
+        );
+        let parsed = postgres_connection_url(&injected).unwrap();
+        let config = tokio_postgres::Config::from_str(&parsed.url).unwrap();
+        assert_eq!(config.get_password(), Some(b"Abc#123!def*".as_slice()));
     }
 
     #[test]
