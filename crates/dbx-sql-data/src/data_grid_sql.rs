@@ -4973,9 +4973,15 @@ const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
 /// `database_structure_search_sql`, which already omits it for ClickHouse. Their
 /// patterns stay unescaped: declaring the escape character would be a syntax
 /// error, and escaping without the clause would look for literal `~` text.
+/// Doris 2.1 rejects the clause too (#15035: Doris 2.1.10 reports `Syntax
+/// error ... Encountered: IDENTIFIER, Expected: ||` with the caret on
+/// `ESCAPE`), so it omits the clause as well — but unlike the other two,
+/// Doris documents `\` as the default LIKE escape character, so its patterns
+/// are escaped with `\` and keep matching literally (see
+/// `data_grid_like_pattern`).
 /// Every other SQL target accepts the clause.
 fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool {
-    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse))
+    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse | DatabaseType::Doris))
 }
 
 /// Build the LIKE pattern for a user-typed filter value.
@@ -4989,7 +4995,13 @@ fn data_grid_like_pattern(
     database_type: Option<DatabaseType>,
 ) -> String {
     let raw = value_to_filter_text(value);
-    let body = if data_grid_like_escape_supported(database_type) { escape_data_grid_like_literal(&raw) } else { raw };
+    let body = if database_type == Some(DatabaseType::Doris) {
+        escape_data_grid_like_literal_with_backslash(&raw)
+    } else if data_grid_like_escape_supported(database_type) {
+        escape_data_grid_like_literal(&raw)
+    } else {
+        raw
+    };
     match template {
         DataGridLikeTemplate::Contains => format!("%{body}%"),
         DataGridLikeTemplate::StartsWith => format!("{body}%"),
@@ -5002,6 +5014,22 @@ fn escape_data_grid_like_literal(value: &str) -> String {
     for ch in value.chars() {
         if ch == DATA_GRID_LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
             escaped.push(DATA_GRID_LIKE_ESCAPE_CHAR);
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Escape a LIKE pattern with Doris's default escape character `\` (the Doris
+/// pattern-matching docs: with no `ESCAPE` clause, `\` escapes `%`, `_` and
+/// itself). Used instead of `~`-escaping where the `ESCAPE '~'` clause cannot
+/// be emitted. The `\` survives into the pattern the server sees because
+/// `format_grid_sql_literal` doubles backslashes in the SQL text.
+fn escape_data_grid_like_literal_with_backslash(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        if ch == '\\' || ch == '%' || ch == '_' {
+            escaped.push('\\');
         }
         escaped.push(ch);
     }
@@ -7591,6 +7619,56 @@ mod tests {
                 assert!(sql.contains("'a_%'") || sql.contains("'%a_'"), "{sql}");
             }
         }
+    }
+
+    /// #15035: Doris 2.1 rejects `LIKE ... ESCAPE` — its parser reads `ESCAPE`
+    /// as a bare identifier after the pattern (`Syntax error ... Encountered:
+    /// IDENTIFIER, Expected: ||` with the caret on `ESCAPE`). The clause is
+    /// omitted for Doris, and patterns are escaped with Doris's default LIKE
+    /// escape character `\` instead, so typed values still match literally.
+    /// (`format_grid_sql_literal` doubles the backslash in the SQL text, so the
+    /// pattern the server sees keeps the single `\`.)
+    #[test]
+    fn doris_like_filter_omits_escape_clause_and_uses_backslash_escape() {
+        let condition = |mode: DataGridContextFilterMode, value: &str, column_name: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                column_name: column_name.to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column(column_name, "varchar", false, None)),
+            })
+        };
+
+        // The reported case: a plain "starts with" value must not emit the
+        // clause Doris 2.1.10 rejects.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "411603004", "code12").as_deref(),
+            Some("`code12` LIKE '411603004%'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::NotBeginsWith, "tmp", "file_name").as_deref(),
+            Some("`file_name` NOT LIKE 'tmp%'")
+        );
+        // `%` stays a literal: the pattern carries `\%`, doubled to `\\%` in
+        // the SQL text so Doris's string layer hands LIKE a single `\%`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "50%", "file_name").as_deref(),
+            Some("`file_name` LIKE '50\\\\%%'")
+        );
+        assert_eq!(
+            condition(DataGridContextFilterMode::Like, "a_b", "file_name").as_deref(),
+            Some("`file_name` LIKE '%a\\\\_b%'")
+        );
+        // A literal backslash in the value is doubled by the pattern escape
+        // and again by the SQL literal, so LIKE sees `\\`.
+        assert_eq!(
+            condition(DataGridContextFilterMode::BeginsWith, "a\\b", "file_name").as_deref(),
+            Some("`file_name` LIKE 'a\\\\\\\\b%'")
+        );
     }
 
     #[test]
