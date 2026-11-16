@@ -2010,12 +2010,26 @@ function dispatchBeforeResultTabSwitch() {
  * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
  * 再次点击当前已固定的结果会取消固定，无需再打开右键菜单；
  * 从其他结果标签切换过来时只切换显示，不会取消已有的固定。
+ * 切换是异步的（被回收的结果需从快照恢复）：一次切换尚未完成时又点击
+ * 其他标签，第二次点击看到的仍是旧的当前结果，不能把它当作对已显示
+ * 结果的再次点击（issue #15037）。
  */
+let pendingResultRunTabSwitches = 0;
 async function selectResultRunFromTab(runId: string) {
   const wasActive = runId === props.activeTab.activeResultRunId;
-  if (!(await selectResultRun(runId))) return;
+  const switchWasInFlight = pendingResultRunTabSwitches > 0;
+  pendingResultRunTabSwitches += 1;
+  try {
+    if (!(await selectResultRun(runId))) return;
+  } finally {
+    pendingResultRunTabSwitches -= 1;
+  }
+  // 只有在点击时该结果已显示、且没有其他切换正在进行时，这次点击才是
+  // 对已显示结果的再次点击；否则 wasActive 看到的仍是旧的当前结果，
+  // 不能据此取消固定（issue #15037）。未固定结果的点击固定不受影响。
+  const reClickedShownRun = wasActive && !switchWasInFlight;
   const run = resultRuns.value.find((item) => item.id === runId);
-  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, wasActive)) toggleResultRunPinned(runId);
+  if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, reClickedShownRun)) toggleResultRunPinned(runId);
 }
 
 async function focusResultRunByIndex(index: number) {

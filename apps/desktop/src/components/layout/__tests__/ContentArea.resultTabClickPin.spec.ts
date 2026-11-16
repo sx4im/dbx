@@ -13,6 +13,9 @@ vi.mock("@/composables/useToolbarOverflow", async () => {
 vi.mock("@/lib/tabs/tabResultCache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/tabs/tabResultCache")>()),
   writeTabResultSnapshot: vi.fn().mockResolvedValue(false),
+  readTabResultSnapshot: vi.fn(async () => ({
+    resultRuns: [{ id: "second", result: { columns: ["id"], rows: [[1]], affected_rows: 0, execution_time_ms: 1 } }],
+  })),
 }));
 vi.mock("@/components/grid/DataGrid.vue", () => ({ __esModule: true, default: { render: () => null } }));
 import ContentArea from "../ContentArea.vue";
@@ -118,6 +121,40 @@ describe("result-tab click pinning", () => {
       await vi.waitFor(() => expect(tab.activeResultRunId).toBe(runId));
       for (let tick = 0; tick < 10; tick++) await nextTick();
     }
+    expect(tab.resultRuns![0]!.pinned).toBe(true);
+    expect(tab.resultRuns![1]!.pinned).toBe(true);
+  });
+
+  it("still pins an unpinned run when switching back rapidly (#9975)", async () => {
+    // Pin-on-switch is deliberate: clicking an unpinned run keeps it for the
+    // next query. A rapid switch back is still a switch, so the pin applies.
+    const { host, tab } = await mountResults(true, true);
+    const tabs = () => host.querySelectorAll<HTMLButtonElement>("[data-result-run-tab]");
+    tabs()[1]!.click();
+    tabs()[0]!.click();
+    await vi.waitFor(() => expect(tab.activeResultRunId).toBe("first"));
+    for (let index = 0; index < 10; index++) await nextTick();
+    expect(tab.resultRuns![0]!.pinned).toBe(true);
+    expect(tab.resultRuns![1]!.pinned).toBe(true);
+  });
+
+  it("does not unpin the shown run when a slow switch is interrupted by a switch back (#15037)", async () => {
+    const { host, tab, queries } = await mountResults(true, true);
+    queries.toggleResultRunPinned(tab.id, "first");
+    expect(tab.resultRuns![0]!.pinned).toBe(true);
+    // The second run's payload was evicted after an earlier switch, so
+    // showing it again restores from the snapshot cache asynchronously.
+    // Clicking back to the first run before that restore settles must not be
+    // mistaken for a re-click on the shown tab (#14599 still reproduces).
+    const second = tab.resultRuns![1]!;
+    second.result = undefined;
+    second.results = [];
+    second.resultCacheKey = "test-cache-key";
+    const tabs = () => host.querySelectorAll<HTMLButtonElement>("[data-result-run-tab]");
+    tabs()[1]!.click();
+    tabs()[0]!.click();
+    await vi.waitFor(() => expect(tab.activeResultRunId).toBe("first"));
+    for (let index = 0; index < 10; index++) await nextTick();
     expect(tab.resultRuns![0]!.pinned).toBe(true);
     expect(tab.resultRuns![1]!.pinned).toBe(true);
   });
