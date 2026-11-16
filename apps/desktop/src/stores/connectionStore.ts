@@ -295,6 +295,19 @@ function mysqlTableListSourceChanged(config: ConnectionConfig, databaseInfo: Dat
   return config.db_type === "mysql" && usesProxyLogicalTables(config.database_info) !== usesProxyLogicalTables(databaseInfo);
 }
 
+/**
+ * True when background version detection reports a different MySQL server
+ * version than the one recorded for this connection (#15034): the server
+ * behind the same host/port was swapped (e.g. 5.7 replaced by 8.0). The
+ * first detection (no recorded version) and a redetection of the same
+ * version do not count.
+ */
+function mysqlServerVersionChanged(config: ConnectionConfig, databaseInfo: DatabaseConnectionInfo): boolean {
+  const previousVersion = config.database_info?.productVersion;
+  const nextVersion = databaseInfo.productVersion;
+  return config.db_type === "mysql" && !!previousVersion && !!nextVersion && previousVersion !== nextVersion;
+}
+
 function normalizeTableNameFilter(filter: Partial<TableNameFilter> | undefined | null): TableNameFilter {
   const normalizePatterns = (patterns: unknown): string[] => (Array.isArray(patterns) ? patterns.map((pattern) => (typeof pattern === "string" ? pattern.trim() : "")).filter(Boolean) : []);
   return {
@@ -5117,6 +5130,7 @@ export const useConnectionStore = defineStore("connection", () => {
     if (expectedConfigFingerprint && connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
     if (JSON.stringify(current.database_info) === JSON.stringify(normalized)) return;
     const tableListSourceChanged = mysqlTableListSourceChanged(current, normalized);
+    const serverVersionChanged = mysqlServerVersionChanged(current, normalized);
     const jobEngine = nativeJobAdminEngine(current);
 
     await api.saveConnectionDatabaseInfo(connectionId, normalized);
@@ -5133,10 +5147,16 @@ export const useConnectionStore = defineStore("connection", () => {
       const connectionNode = findConnectionNode(connectionId);
       if (connectionNode) connectionNode.children = withConnectionUtilityNodes(connectionId, connectionNode.children ?? [], connectionNode);
     }
-    if (tableListSourceChanged) {
-      // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES.
-      // Discard physical-table metadata that may have loaded before background version detection completed.
-      bumpTableListSourceRevision(connectionId);
+    if (tableListSourceChanged || serverVersionChanged) {
+      // A detected MySQL server-version change means the cached database list
+      // belongs to a different server (#15034): the version display already
+      // updates through this path, but the list does not. Reload it the same
+      // way a manual refresh does.
+      if (tableListSourceChanged) {
+        // ShardingSphere switches table enumeration from information_schema to SHOW FULL TABLES.
+        // Discard physical-table metadata that may have loaded before background version detection completed.
+        bumpTableListSourceRevision(connectionId);
+      }
       treeNodeLoads.cancelPrefix(connectionId);
       invalidateCompletionCache(connectionId);
       void invalidateSidebarTableSearchIndexesForConnection(connectionId);
