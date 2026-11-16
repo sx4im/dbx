@@ -4968,14 +4968,33 @@ enum DataGridLikeTemplate {
 /// filter keeps the same meaning as those patterns.
 const DATA_GRID_LIKE_ESCAPE_CHAR: char = '~';
 
+/// How a grid LIKE pattern escapes literal wildcards.
+///
 /// TDengine rejects `LIKE ... ESCAPE` outright, and ClickHouse only added the
 /// clause in 26.6 (upstream issue #99599) — see
 /// `database_structure_search_sql`, which already omits it for ClickHouse. Their
 /// patterns stay unescaped: declaring the escape character would be a syntax
 /// error, and escaping without the clause would look for literal `~` text.
-/// Every other SQL target accepts the clause.
-fn data_grid_like_escape_supported(database_type: Option<DatabaseType>) -> bool {
-    !matches!(database_type, Some(DatabaseType::Tdengine | DatabaseType::ClickHouse))
+/// Doris only grew the clause in 3.0.7 (#52540), so on 2.x the clause itself
+/// is a syntax error at `ESCAPE` (#15035). Doris's default escape character
+/// is `\`, so Doris patterns escape with a backslash and omit the clause;
+/// that reads correctly on every Doris version.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DataGridLikeEscape {
+    /// Escape with `~` and emit `ESCAPE '~'`.
+    Tilde,
+    /// Escape with `\` (the dialect's default) and emit no clause.
+    Backslash,
+    /// No escaping and no clause.
+    None,
+}
+
+fn data_grid_like_escape(database_type: Option<DatabaseType>) -> DataGridLikeEscape {
+    match database_type {
+        Some(DatabaseType::Doris) => DataGridLikeEscape::Backslash,
+        Some(DatabaseType::Tdengine | DatabaseType::ClickHouse) => DataGridLikeEscape::None,
+        _ => DataGridLikeEscape::Tilde,
+    }
 }
 
 /// Build the LIKE pattern for a user-typed filter value.
@@ -4989,7 +5008,11 @@ fn data_grid_like_pattern(
     database_type: Option<DatabaseType>,
 ) -> String {
     let raw = value_to_filter_text(value);
-    let body = if data_grid_like_escape_supported(database_type) { escape_data_grid_like_literal(&raw) } else { raw };
+    let body = match data_grid_like_escape(database_type) {
+        DataGridLikeEscape::Tilde => escape_data_grid_like_literal(&raw, DATA_GRID_LIKE_ESCAPE_CHAR),
+        DataGridLikeEscape::Backslash => escape_data_grid_like_literal(&raw, '\\'),
+        DataGridLikeEscape::None => raw,
+    };
     match template {
         DataGridLikeTemplate::Contains => format!("%{body}%"),
         DataGridLikeTemplate::StartsWith => format!("{body}%"),
@@ -4997,11 +5020,11 @@ fn data_grid_like_pattern(
     }
 }
 
-fn escape_data_grid_like_literal(value: &str) -> String {
+fn escape_data_grid_like_literal(value: &str, escape_char: char) -> String {
     let mut escaped = String::with_capacity(value.len() + 8);
     for ch in value.chars() {
-        if ch == DATA_GRID_LIKE_ESCAPE_CHAR || ch == '%' || ch == '_' {
-            escaped.push(DATA_GRID_LIKE_ESCAPE_CHAR);
+        if ch == escape_char || ch == '%' || ch == '_' {
+            escaped.push(escape_char);
         }
         escaped.push(ch);
     }
@@ -5017,7 +5040,7 @@ fn data_grid_like_condition(
     database_type: Option<DatabaseType>,
 ) -> String {
     let literal = format_grid_sql_literal(&Value::String(pattern), database_type, None);
-    if data_grid_like_escape_supported(database_type) {
+    if data_grid_like_escape(database_type) == DataGridLikeEscape::Tilde {
         format!("{like_column} {operator} {literal} ESCAPE '{DATA_GRID_LIKE_ESCAPE_CHAR}'")
     } else {
         format!("{like_column} {operator} {literal}")
@@ -7591,6 +7614,55 @@ mod tests {
                 assert!(sql.contains("'a_%'") || sql.contains("'%a_'"), "{sql}");
             }
         }
+    }
+
+    /// Doris only grew `LIKE ... ESCAPE` in 3.0.7 (#52540), so on 2.x the
+    /// clause itself is a syntax error at `ESCAPE` (#15035: Doris 2.1.10
+    /// rejects `` `code12` LIKE '411603004%' ESCAPE '~' ``). Doris's default
+    /// escape character is `\`, so Doris patterns escape with a backslash and
+    /// omit the clause entirely; that reads correctly on every Doris version.
+    /// StarRocks keeps the `~` clause: it is MySQL-compatible and accepts it.
+    #[test]
+    fn doris_like_filter_uses_default_backslash_escape_without_clause() {
+        let condition = |mode: DataGridContextFilterMode, value: &str| {
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Doris),
+                identifier_quote: None,
+                column_name: "code12".to_string(),
+                mode,
+                value: json!(value),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("code12", "varchar", false, None)),
+            })
+            .unwrap_or_default()
+        };
+
+        // The reported shape: a plain starts-with filter, no ESCAPE clause.
+        assert_eq!(condition(DataGridContextFilterMode::BeginsWith, "411603004"), "`code12` LIKE '411603004%'");
+        // `_` stays a literal: it is escaped with Doris's default backslash.
+        // The literal renderer doubles the backslash in the SQL text, which
+        // Doris parses back to one.
+        assert_eq!(condition(DataGridContextFilterMode::BeginsWith, "a_"), "`code12` LIKE 'a\\\\_%'");
+        // `%` likewise stays literal.
+        assert_eq!(condition(DataGridContextFilterMode::Like, "50%"), "`code12` LIKE '%50\\\\%%'");
+        // A literal backslash in the value is escaped too.
+        assert_eq!(condition(DataGridContextFilterMode::BeginsWith, "a\\b"), "`code12` LIKE 'a\\\\\\\\b%'");
+        // StarRocks is unaffected: it still declares the `~` escape.
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::StarRocks),
+                identifier_quote: None,
+                column_name: "file_name".to_string(),
+                mode: DataGridContextFilterMode::BeginsWith,
+                value: json!("FN"),
+                values: Vec::new(),
+                end_value: None,
+                column_info: Some(column("file_name", "varchar", false, None)),
+            })
+            .as_deref(),
+            Some("`file_name` LIKE 'FN%' ESCAPE '~'")
+        );
     }
 
     #[test]
