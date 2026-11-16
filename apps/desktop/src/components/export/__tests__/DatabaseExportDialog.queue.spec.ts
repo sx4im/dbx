@@ -398,3 +398,22 @@ it("disables export of picked routines once objects are no longer included (#139
 
   expect(button("databaseExport.export").disabled).toBe(true);
 });
+it("treats the database as the schema when a schema-aware connection reports no schemas (#15068)", async () => {
+  // Generic JDBC to MySQL reports no schemas (its driver has no schema level
+  // beyond the catalog), so the dialog used to show no table selection and a
+  // permanently disabled Export button. The database itself is the schema,
+  // exactly as the object browser and the all-databases plan already treat it.
+  connection.db_type = "jdbc";
+  mocks.listSchemas.mockResolvedValue([]);
+  const dialog = await mountDialog(false, { prefillSchema: "" });
+  await vi.waitFor(() => {
+    expect(dialog.host.textContent).toContain("databaseExport.tableSelection");
+  });
+  const button = [...dialog.host.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.trim() === "databaseExport.export")!;
+  expect(button).toBeDefined();
+  expect(button.disabled).toBe(false);
+  await dialog.start();
+  await vi.waitFor(() => expect(operations).toHaveLength(1));
+  expect(operations[0]!.request).toMatchObject({ database: "app", schema: "app", selectedTables: ["orders"] });
+  terminal(0);
+});

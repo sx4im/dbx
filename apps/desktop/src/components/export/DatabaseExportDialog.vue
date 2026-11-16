@@ -388,6 +388,17 @@ async function loadSchemas(preferredSchema = "") {
   }
 
   const schemaList = filterExportableSchemas(await api.listSchemas(connectionId.value, database.value), config?.db_type);
+  // A schema-aware connection whose driver reports no schemas (generic JDBC
+  // to MySQL has no schema level beyond the catalog) must not dead-end the
+  // dialog: with no schema the table list never loads and Export stays
+  // disabled with no error (#15068). The database itself is the schema here,
+  // exactly as the non-schema-aware path above, the object browser
+  // (databaseObjectTreeNodeSchema) and buildAllDatabaseExportPlan treat it.
+  if (schemaList.length === 0) {
+    schemas.value = [];
+    schema.value = database.value;
+    return;
+  }
   const selected = preferredSchema && schemaList.includes(preferredSchema) ? preferredSchema : schemaList.includes("public") ? "public" : (schemaList[0] ?? "");
   schemas.value = schemaList;
   schema.value = selected;
