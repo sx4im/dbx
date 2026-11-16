@@ -2942,6 +2942,18 @@ pub fn format_grid_sql_literal_with_spatial(
             return text;
         }
     }
+    // PostgreSQL has no boolean-to-bit literal path: a bit string sent as a
+    // quoted string must already be exactly the column width, so an
+    // over-wide value such as "00000001" for bit(1) fails on the server with
+    // "bit string length 8 does not match type bit(1)" (#15061). Emit the
+    // value as a B'...' literal at the column's declared width instead.
+    // Values that do not fit the width fall through to the quoted string so
+    // the server still rejects them instead of silently truncating.
+    if database_type == Some(DatabaseType::Postgres) {
+        if let Some(literal) = format_postgres_bit_literal(value, column_info) {
+            return literal;
+        }
+    }
     if let Some(number) = value.as_number() {
         return number.to_string();
     }
@@ -3639,6 +3651,53 @@ fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColu
     None
 }
 
+/// Declared width of a PostgreSQL fixed-length bit column, if any.
+/// Bare `bit` is bit(1); `bit varying` has no fixed width.
+fn postgres_bit_width(data_type: &str) -> Option<usize> {
+    let lower = data_type.to_ascii_lowercase();
+    if lower.contains("varying") {
+        return None;
+    }
+    if let Some(start) = lower.find("bit(") {
+        let digits: String = lower[start + 4..].chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        return digits.parse().ok();
+    }
+    if lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == "bit") {
+        return Some(1);
+    }
+    None
+}
+
+/// Format a value for a PostgreSQL fixed-length bit column as a B'...'
+/// literal at the column's declared width. Leading zeros beyond the width
+/// are dropped (they carry no value); a value that does not fit returns
+/// None so the caller falls through to the quoted string and the server
+/// rejects it instead of silently truncating.
+fn format_postgres_bit_literal(value: &Value, column_info: Option<&DataGridColumnInfo>) -> Option<String> {
+    let width = postgres_bit_width(&column_info?.data_type)?;
+    let bits = if let Some(number) = value.as_u64() {
+        format!("{number:b}")
+    } else if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || !trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
+            return None;
+        }
+        trimmed.to_string()
+    } else {
+        return None;
+    };
+    if bits.len() > width {
+        let (dropped, kept) = bits.split_at(bits.len() - width);
+        if !dropped.chars().all(|ch| ch == '0') {
+            return None;
+        }
+        return Some(format!("B'{kept}'"));
+    }
+    let mut padded = "0".repeat(width - bits.len());
+    padded.push_str(&bits);
+    Some(format!("B'{padded}'"))
+}
+
 fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("true") {
@@ -3651,7 +3710,11 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
         return Some(if trimmed.len() == 1 {
             trimmed.to_string()
         } else if trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
-            format!("b'{trimmed}'")
+            // Drop leading zeros: a bit(1) value read back as the byte-wide
+            // "00000001" must round-trip as b'1', not the over-wide
+            // b'00000001' the server rejects (#15061).
+            let bits = trimmed.trim_start_matches('0');
+            format!("b'{}'", if bits.is_empty() { "0" } else { bits })
         } else {
             trimmed.to_string()
         });
@@ -3660,7 +3723,8 @@ fn format_mysql_bit_literal_text(text: &str) -> Option<String> {
     if lower.starts_with("b'") && trimmed.ends_with('\'') {
         let bits = &trimmed[2..trimmed.len() - 1];
         if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
-            return Some(format!("b'{bits}'"));
+            let bits = bits.trim_start_matches('0');
+            return Some(format!("b'{}'", if bits.is_empty() { "0" } else { bits }));
         }
     }
     None
@@ -3675,13 +3739,16 @@ fn format_kingbase_bit_literal_text(text: &str) -> Option<String> {
         return Some("b'0'".to_string());
     }
     if !trimmed.is_empty() && trimmed.chars().all(|ch| matches!(ch, '0' | '1')) {
-        return Some(format!("b'{trimmed}'"));
+        // Drop leading zeros (see format_mysql_bit_literal_text, #15061).
+        let bits = trimmed.trim_start_matches('0');
+        return Some(format!("b'{}'", if bits.is_empty() { "0" } else { bits }));
     }
     let lower = trimmed.to_ascii_lowercase();
     if lower.starts_with("b'") && trimmed.ends_with('\'') {
         let bits = &trimmed[2..trimmed.len() - 1];
         if !bits.is_empty() && bits.chars().all(|ch| matches!(ch, '0' | '1')) {
-            return Some(format!("b'{bits}'"));
+            let bits = bits.trim_start_matches('0');
+            return Some(format!("b'{}'", if bits.is_empty() { "0" } else { bits }));
         }
     }
     None
@@ -11463,7 +11530,47 @@ mod tests {
             format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Mysql), Some(&bit_string)),
             "b'10101010'"
         );
-        assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "'0'");
+        // A bit(1) value read back as the byte-wide "00000001" must round-trip
+        // as the single-bit literal b'1': emitting b'00000001' fails on the
+        // server with "bit string length 8 does not match type bit(1)" (#15061).
+        assert_eq!(format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Mysql), Some(&bit)), "b'1'");
+        assert_eq!(format_grid_sql_literal(&json!("00000000"), Some(DatabaseType::Mysql), Some(&bit)), "b'0'");
+        assert_eq!(
+            format_grid_sql_literal(&json!("00001010"), Some(DatabaseType::Mysql), Some(&bit_string)),
+            "b'1010'"
+        );
+        assert_eq!(format_grid_sql_literal(&json!("0"), Some(DatabaseType::Postgres), Some(&bit)), "B'0'");
+    }
+
+    #[test]
+    fn formats_postgres_bit_literals_to_declared_width() {
+        let bit_one = column("flag", "bit(1)", true, None);
+        let bit_eight = column("flags", "bit(8)", true, None);
+        let bit_varying = column("flags", "bit varying", true, None);
+
+        // The reported failure: "00000001" for bit(1) must become B'1', not
+        // the quoted string the server rejects (#15061).
+        assert_eq!(format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Postgres), Some(&bit_one)), "B'1'");
+        assert_eq!(format_grid_sql_literal(&json!("00000000"), Some(DatabaseType::Postgres), Some(&bit_one)), "B'0'");
+        // Short values are padded to the declared width; exact-width values pass through.
+        assert_eq!(format_grid_sql_literal(&json!("1"), Some(DatabaseType::Postgres), Some(&bit_eight)), "B'00000001'");
+        assert_eq!(
+            format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Postgres), Some(&bit_eight)),
+            "B'10101010'"
+        );
+        // Numbers take the same path.
+        assert_eq!(format_grid_sql_literal(&json!(1), Some(DatabaseType::Postgres), Some(&bit_one)), "B'1'");
+        // A value that does not fit stays a quoted string so the server
+        // rejects it instead of silently truncating.
+        assert_eq!(
+            format_grid_sql_literal(&json!("10101010"), Some(DatabaseType::Postgres), Some(&bit_one)),
+            "'10101010'"
+        );
+        // bit varying has no fixed width and keeps the quoted string.
+        assert_eq!(
+            format_grid_sql_literal(&json!("00000001"), Some(DatabaseType::Postgres), Some(&bit_varying)),
+            "'00000001'"
+        );
     }
 
     #[test]
@@ -11487,6 +11594,16 @@ mod tests {
                 Some("`"),
             ),
             "b'10101010'"
+        );
+        // Same leading-zero round-trip for Kingbase bit(1) (#15061).
+        assert_eq!(
+            format_grid_sql_literal_with_identifier_quote(
+                &json!("00000001"),
+                Some(DatabaseType::Kingbase),
+                Some(&bit),
+                Some("`"),
+            ),
+            "b'1'"
         );
         assert_eq!(
             format_grid_sql_literal_with_identifier_quote(
