@@ -122,6 +122,42 @@ describe("result-tab click pinning", () => {
     expect(tab.resultRuns![1]!.pinned).toBe(true);
   });
 
+  it("keeps the shown pinned run pinned when a slow restore overlaps a switch back (#15037)", async () => {
+    const { host, tab, queries } = await mountResults(true, true);
+    queries.toggleResultRunPinned(tab.id, "first");
+    const tabs = () => host.querySelectorAll<HTMLButtonElement>("[data-result-run-tab]");
+    let resolveSecond!: (value: boolean) => void;
+    let resolveFirst!: (value: boolean) => void;
+    const secondRestore = new Promise<boolean>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const firstRestore = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    queries.setActiveResultRun = vi.fn(async (_id: string, runId: string) => {
+      if (runId === "second") {
+        await secondRestore;
+        tab.activeResultRunId = "second";
+      } else {
+        await firstRestore;
+        tab.activeResultRunId = "first";
+      }
+      return true;
+    }) as typeof queries.setActiveResultRun;
+    tabs()[1]!.click();
+    await nextTick();
+    tabs()[0]!.click();
+    await nextTick();
+    resolveSecond(true);
+    await nextTick();
+    await nextTick();
+    resolveFirst(true);
+    await vi.waitFor(() => expect(tab.activeResultRunId).toBe("first"));
+    for (let tick = 0; tick < 10; tick++) await nextTick();
+    expect(tab.resultRuns![0]!.pinned).toBe(true);
+    expect(tab.resultRuns![1]!.pinned).toBe(true);
+  });
+
   it("applies a setting change to already mounted result tabs", async () => {
     const { host, tab, settings } = await mountResults(false);
     settings.editorSettings.pinResultTabOnClick = true;

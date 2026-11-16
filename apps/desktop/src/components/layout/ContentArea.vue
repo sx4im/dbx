@@ -1984,12 +1984,18 @@ async function closeCurrentQueryResult() {
   emit("update:activeOutputView", props.activeTab.id, "result");
 }
 
+// 每次成功切换结果都递增。点击结果标签时先记下当前值，恢复完成后再比对：
+// 若等待期间另一次切换已完成，说明这次点击只是快速来回切换，不是“点击已
+// 展示的标签来取消固定”，不能再按点击前的 wasActive 切换固定状态（#15037）。
+const resultRunSelectionGeneration = ref(0);
+
 async function selectResultRun(runId: string) {
   if (runId !== props.activeTab.activeResultRunId) dispatchBeforeResultTabSwitch();
   if (!(await queryStore.setActiveResultRun(props.activeTab.id, runId))) {
     toast(t("tabs.missingResultRun"), 4000);
     return false;
   }
+  resultRunSelectionGeneration.value += 1;
   emit("update:activeOutputView", props.activeTab.id, "result");
   return true;
 }
@@ -2010,10 +2016,17 @@ function dispatchBeforeResultTabSwitch() {
  * 未固定的结果会被下一次普通查询复用/覆盖，点击后固定即可保留下来；
  * 再次点击当前已固定的结果会取消固定，无需再打开右键菜单；
  * 从其他结果标签切换过来时只切换显示，不会取消已有的固定。
+ * 恢复被逐出到磁盘的结果很慢，来回快速点击会让多次切换重叠（#15037），
+ * 因此只有本次点击自己的切换完成时才切换固定状态，见 selectionGeneration。
  */
 async function selectResultRunFromTab(runId: string) {
   const wasActive = runId === props.activeTab.activeResultRunId;
+  const selectionGeneration = resultRunSelectionGeneration.value;
   if (!(await selectResultRun(runId))) return;
+  // 被逐出到磁盘的结果恢复很慢，来回快速点击会让多次切换重叠：点击时该标签
+  // 仍是展示中的标签，但等待期间另一次切换已经完成，这次点击只是切换，不
+  // 能再取消固定（#15037）。只有本次点击自己的切换完成时才按原有规则切换。
+  if (resultRunSelectionGeneration.value !== selectionGeneration + 1) return;
   const run = resultRuns.value.find((item) => item.id === runId);
   if (shouldPinResultRunOnClick(run, settingsStore.editorSettings.pinResultTabOnClick, wasActive)) toggleResultRunPinned(runId);
 }
