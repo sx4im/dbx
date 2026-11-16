@@ -334,6 +334,26 @@ describe("EditorSettingsDialog MCP capability persistence integration", () => {
     expect(dialogSource).not.toContain('id="mcp-plugin-tools-mode-label"');
   });
 
+  it("shows plugin tools in the capability browser on web (#15021)", () => {
+    // The web backend serves the same plugin MCP views as desktop
+    // (GET /api/app-settings/plugin-mcp), so the capabilities tab must not
+    // hide its plugin section behind a desktop-only gate.
+    const browser = dialogSource.match(/<McpCapabilityBrowser[\s\S]*?>([\s\S]*?)<\/McpCapabilityBrowser>/)?.[0];
+    expect(browser).toContain(':plugins="mcpPluginViews"');
+    expect(browser).not.toMatch(/:show-plugins="[^"]*isWeb[^"]*"/);
+  });
+
+  it("loads plugin views when the capabilities tab opens on web (#15021)", () => {
+    const watcher = dialogSource.match(/watch\(mcpManagementTab, \(tab\) => \{([\s\S]*?)\n\}\);/)?.[1];
+    expect(watcher).toContain("void loadMcpPluginViews()");
+    expect(watcher).not.toContain("isWeb");
+  });
+
+  it("shows the plugin allowlist warning on web too (#15021)", () => {
+    expect(dialogSource).toContain('v-if="mcpPluginToolsBlockedByAllowlist"');
+    expect(dialogSource).not.toContain('v-if="!isWeb && mcpPluginToolsBlockedByAllowlist"');
+  });
+
   it.each(["auto", "flat", "lazy"] as const)("keeps a saved %s delivery mode when applying unrelated settings", async (pluginToolsMode) => {
     const h = createHarness({ configured: true, pluginToolsMode });
     expect(h.mcpPolicyDraft.value.pluginToolsMode).toBe(pluginToolsMode);
