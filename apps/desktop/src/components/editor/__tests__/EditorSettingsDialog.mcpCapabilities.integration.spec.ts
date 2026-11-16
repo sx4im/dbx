@@ -1,5 +1,5 @@
 import ts from "typescript";
-import { computed, ref, shallowRef, type Ref } from "vue";
+import { computed, nextTick, ref, shallowRef, watch, type Ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import dialogSource from "../EditorSettingsDialog.vue?raw";
 import { DEFAULT_DESKTOP_SETTINGS, DEFAULT_SIDEBAR_TABLE_PAGE_SIZE, normalizeMcpGlobalPolicy, type McpGlobalPolicy } from "@/stores/settingsStore";
@@ -28,6 +28,18 @@ function declaration(name: string): string {
     }
   }
   throw new Error(`Missing real settings declaration: ${name}`);
+}
+
+function mcpManagementTabWatcherSource(): string {
+  for (const statement of source.statements) {
+    if (!ts.isExpressionStatement(statement)) continue;
+    const expression = statement.expression;
+    if (!ts.isCallExpression(expression)) continue;
+    if (expression.expression.getText(source) !== "watch") continue;
+    if (expression.arguments[0]?.getText(source) !== "mcpManagementTab") continue;
+    return statement.getText(source);
+  }
+  throw new Error("Missing MCP management tab watcher");
 }
 
 const exposedNames = [
@@ -1175,5 +1187,41 @@ describe("MCP policy corruption recovery", () => {
     await h.recoverMcpAccessPolicy();
     expect(h.mcpAccessPolicyError.value).toBe("backup failed");
     expect(h.mcpPolicyRecovering.value).toBe(false);
+  });
+
+  async function openCapabilitiesTab(isWeb: boolean) {
+    const loadViews = vi.fn(async () => {});
+    const loadCatalog = vi.fn(async () => {});
+    const loadScopeContext = vi.fn(async () => {});
+    const tab = ref("access");
+    const views = ref<PluginMcpView[] | null>(null);
+    const runWatcher = new Function(
+      "watch",
+      "mcpManagementTab",
+      "loadMcpPluginScopeContext",
+      "ensureMcpToolCatalog",
+      "loadMcpPluginViews",
+      "mcpPluginViews",
+      "isWeb",
+      mcpManagementTabWatcherSource(),
+    ) as (...args: unknown[]) => void;
+    runWatcher(watch, tab, loadScopeContext, loadCatalog, loadViews, views, isWeb);
+    tab.value = "capabilities";
+    await nextTick();
+    return { loadViews, loadCatalog, loadScopeContext };
+  }
+
+  it("loads plugin views when the capabilities tab opens on web", async () => {
+    const { loadViews, loadCatalog, loadScopeContext } = await openCapabilitiesTab(true);
+    expect(loadCatalog).toHaveBeenCalledTimes(1);
+    expect(loadViews).toHaveBeenCalledTimes(1);
+    expect(loadScopeContext).not.toHaveBeenCalled();
+  });
+
+  it("loads plugin views when the capabilities tab opens on desktop", async () => {
+    const { loadViews, loadCatalog, loadScopeContext } = await openCapabilitiesTab(false);
+    expect(loadCatalog).toHaveBeenCalledTimes(1);
+    expect(loadViews).toHaveBeenCalledTimes(1);
+    expect(loadScopeContext).not.toHaveBeenCalled();
   });
 });

@@ -4855,7 +4855,7 @@ watch(mcpManagementTab, (tab) => {
   if (tab === "permissions") void loadMcpPluginScopeContext();
   if (tab !== "capabilities") return;
   void ensureMcpToolCatalog();
-  if (!isWeb && mcpPluginViews.value === null) void loadMcpPluginViews();
+  if (mcpPluginViews.value === null) void loadMcpPluginViews();
 });
 
 const mcpCoverageConnections = computed(() => mcpSelectableConnections.value.map((connection) => ({ id: connection.id, name: connection.name, dbType: connection.db_type })));
