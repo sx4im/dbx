@@ -257,6 +257,13 @@ const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "p
 function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
   const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
   if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  // A splitter press must not start a native selection drag: the browser
+  // anchors one at the press point and, as the pointer crosses the editor,
+  // CodeMirror adopts it as its own selection (#15074 — same class as the
+  // scrollbar drag fixed for #2308). Splitpanes drives the drag from its own
+  // listeners, so preventing the default leaves the gesture untouched and any
+  // pre-existing selection is preserved. Touch presses are left alone.
+  if (event instanceof MouseEvent && event.button === 0) event.preventDefault();
   splitterDragging = true;
   beginPanelResize();
   for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);

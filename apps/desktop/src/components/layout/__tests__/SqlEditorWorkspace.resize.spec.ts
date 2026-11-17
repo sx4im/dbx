@@ -200,6 +200,30 @@ describe("workspace real Splitpanes drag lifecycle", () => {
     expect(isPanelResizing.value).toBe(false);
   });
 
+  it("prevents a splitter press from starting a text selection in the editor", async () => {
+    const { host } = await mountWorkspace();
+    const splitter = host.querySelector(".sql-editor-workspace-split > .splitpanes__splitter")!;
+    vi.spyOn(splitter, "getBoundingClientRect").mockReturnValue({ left: 500, top: 500 } as DOMRect);
+    // A real press is cancelable; without that, preventDefault() is a no-op
+    // and the regression would be invisible to this test.
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 500, clientY: 500 });
+    splitter.dispatchEvent(press);
+    // The press must not start a native selection drag: the browser would
+    // anchor it at the splitter and, as the pointer crosses the editor,
+    // CodeMirror adopts it as its own selection (#15074).
+    expect(press.defaultPrevented).toBe(true);
+    expect(isPanelResizing.value).toBe(true);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+  });
+
+  it("leaves a content press alone", async () => {
+    const { host } = await mountWorkspace();
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 100, clientY: 100 });
+    host.querySelector(".splitpanes__pane")!.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(false);
+    expect(isPanelResizing.value).toBe(false);
+  });
+
   it("ignores content clicks and leaves another panel's resize state alone", async () => {
     const { host, store } = await mountWorkspace();
     host.querySelector(".splitpanes__pane")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
