@@ -213,4 +213,35 @@ describe("workspace real Splitpanes drag lifecycle", () => {
     cleanup = undefined;
     expect(isPanelResizing.value).toBe(true);
   });
+
+  // Regression test for #15074: dragging the query-result splitter must not
+  // leave a selection in the editor. The browser starts a native selection
+  // drag from an un-prevented splitter mousedown and finalizes it on release,
+  // after the resize classes are already gone. Preventing the default on the
+  // press stops that session from starting at all.
+  it.each(["shared", "group"] as const)("prevents the default on a %s splitter press so a drag cannot start an editor selection", async (splitter) => {
+    const { host } = await mountWorkspace();
+    const selector = splitter === "shared" ? ".sql-editor-workspace-split" : ".sql-editor-groups";
+    const splitterEl = host.querySelector(`${selector} > .splitpanes__splitter`)!;
+    vi.spyOn(splitterEl, "getBoundingClientRect").mockReturnValue({ left: 500, top: 500 } as DOMRect);
+    const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true, clientX: 500, clientY: 500 });
+    splitterEl.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+    expect(isPanelResizing.value).toBe(true);
+    document.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+    expect(isPanelResizing.value).toBe(false);
+  });
+
+  it("prevents the default on a touch splitter press too", async () => {
+    vi.stubGlobal("ontouchstart", null);
+    const { host } = await mountWorkspace();
+    const splitterEl = host.querySelector(".sql-editor-groups > .splitpanes__splitter")!;
+    const press = new Event("touchstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(press, "touches", { value: [{ clientX: 0, clientY: 0 }] });
+    splitterEl.dispatchEvent(press);
+    expect(press.defaultPrevented).toBe(true);
+    expect(isPanelResizing.value).toBe(true);
+    document.dispatchEvent(new Event("touchend", { bubbles: true }));
+    expect(isPanelResizing.value).toBe(false);
+  });
 });

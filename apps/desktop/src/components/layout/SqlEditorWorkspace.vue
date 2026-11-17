@@ -257,6 +257,10 @@ const splitterEndEvents = ["mouseup", "touchend", "touchcancel", "pointerup", "p
 function onWorkspaceSplitterStart(event: MouseEvent | TouchEvent) {
   const splitter = event.target instanceof Element ? event.target.closest(".splitpanes__splitter") : null;
   if (!splitter?.parentElement?.matches(".sql-editor-workspace-split, .sql-editor-groups") || splitterDragging) return;
+  // Prevent the press from starting a native selection drag: without this the
+  // browser finalizes the drag session on release, after the resize classes
+  // are already gone, and leaves a spurious selection in the editor (#15074).
+  event.preventDefault();
   splitterDragging = true;
   beginPanelResize();
   for (const eventName of splitterEndEvents) document.addEventListener(eventName, onWorkspaceSplitterEnd, true);
