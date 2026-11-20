@@ -329,6 +329,7 @@ import {
   filterModeUsesRange,
   parseFilterValue,
   parseFilterValues,
+  parseWhereInputToStructuredFilterRules,
   removeColumnValueFilterCondition,
 } from "@/lib/dataGrid/dataGridColumnFilter";
 import { normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
@@ -2178,6 +2179,53 @@ watch(filterEditorView, (view) => {
   filterBuilderOpen.value = (view === "conditions" || view === "text") && settingsStore.editorSettings.dataGridKeepFilterEditorExpanded;
   if (view === "conditions" || view === "text") ensureStructuredFilterRule();
 });
+
+// Conditions typed in the WHERE editor never reached the filter panel below
+// (#15320): the manual WHERE text and the panel's rules are independent
+// inputs combined only at query time, so the panel showed a blank rule while
+// `WHERE task_id = 100234` sat above it. Once the panel is open and its
+// rules are still blank, move the parseable conditions over — leaving the
+// rest as manual WHERE text — and apply them, so the effective filter does
+// not change but the conditions become visible and editable in the panel.
+let importManualWhereRequestId = 0;
+async function importManualWhereIntoFilterRules() {
+  if (!canUseWhereSearch.value || !isPersistentFilterView.value || !filterBuilderOpen.value) return;
+  if (!structuredFilterHydrationReady.value) return;
+  if (!structuredFilterRules.value.every((rule) => !rule.columnName)) return;
+  const parsed = parseWhereInputToStructuredFilterRules(whereFilterInput.value, filterBuilderColumnOptions.value, (mode) => filterModeIsSupportedForDatabase(mode, resolvedDatabaseType.value));
+  if (!parsed.rules.length) return;
+  if (!parsed.rules.every((rule) => filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue))) return;
+  const requestId = ++importManualWhereRequestId;
+  const scopeKey = structuredFilterScopeKey.value;
+  const cacheKey = structuredFilterCacheKey.value;
+  const previousRules = structuredFilterRules.value;
+  const nextRules = parsed.rules.map((rule) => ({ ...defaultStructuredFilterRule(), ...rule }));
+  structuredFilterRules.value = nextRules;
+  let where = "";
+  try {
+    where = await buildStructuredWhereFromRules(nextRules);
+  } catch {
+    where = "";
+  }
+  if (requestId !== importManualWhereRequestId || scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value) return;
+  if (!where) {
+    // The backend could not build the imported conditions; put the blank
+    // rule back and leave the manual WHERE text untouched.
+    structuredFilterRules.value = previousRules;
+    return;
+  }
+  appliedStructuredWhereInput.value = where;
+  whereFilterInput.value = parsed.remainder;
+  markConditionInputsApplied();
+}
+
+watch(
+  [filterBuilderOpen, filterEditorView, filterBuilderColumnOptions, structuredFilterHydrationReady],
+  () => {
+    if (filterBuilderOpen.value) void importManualWhereIntoFilterRules();
+  },
+  { immediate: true },
+);
 
 watch(
   () => settingsStore.editorSettings.dataGridKeepFilterEditorExpanded,
