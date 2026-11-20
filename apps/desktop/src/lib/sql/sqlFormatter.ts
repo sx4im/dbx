@@ -5,7 +5,14 @@ import { compressCypherText, formatCypherText } from "@/lib/sql/cypherFormatter"
 import { indentRoutineBlocks, protectOracleRoutineComments } from "@/lib/sql/routineBlockLayout";
 import { tokenizeSqlSemantic } from "@/lib/sql/semantic/tokens";
 
-export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "cypher" | "generic";
+export type SqlFormatDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "oracle" | "clickhouse" | "dameng" | "duckdb" | "cypher" | "generic" | "doris";
+
+// Doris speaks MySQL-dialect SQL (backtick identifiers, `#` comments,
+// backslash string escapes), so every MySQL-specific branch below applies
+// to it as well.
+function isMysqlFamilyDialect(dialect: SqlFormatDialect): boolean {
+  return dialect === "mysql" || dialect === "doris";
+}
 
 export const MAX_SQL_FORMAT_CHARS = 1_000_000;
 
@@ -139,14 +146,19 @@ export class UnsupportedStructuredInputError extends Error {
  *
  * Postgres-compatible engines (GaussDB/openGauss/Kingbase/...) reuse the
  * "postgres" grammar, SQLite-compatible ones reuse "sqlite", and DuckDB gets
- * a scoped preprocessing pass over the generic grammar. Anything unrecognized
- * falls back to the permissive "generic" dialect. Centralized here so every
- * surface that formats SQL (editor, object source, DDL viewers) stays in sync.
+ * a scoped preprocessing pass over the generic grammar. Doris reuses the
+ * "mysql" grammar with a scoped preprocessing pass for its fixed-range
+ * partition value lists (see {@link protectDorisPartitionValueLists}).
+ * Anything unrecognized falls back to the permissive "generic" dialect.
+ * Centralized here so every surface that formats SQL (editor, object source,
+ * DDL viewers) stays in sync.
  */
 export function sqlFormatDialectForDbType(dbType: string | null | undefined): SqlFormatDialect {
   switch (dbType) {
     case "mysql":
       return "mysql";
+    case "doris":
+      return "doris";
     case "postgres":
     case "kwdb":
     case "gaussdb":
@@ -185,6 +197,7 @@ export function sqlFormatDialectForDbType(dbType: string | null | undefined): Sq
 function formatterLanguage(dialect: SqlFormatDialect) {
   switch (dialect) {
     case "mysql":
+    case "doris":
       return "mysql";
     case "postgres":
       return "postgresql";
@@ -434,6 +447,89 @@ function restoreDuckDbPrefixAliasSeparators(sql: string, marker: string | null):
   return marker ? sql.split(marker).join(":") : sql;
 }
 
+/**
+ * Doris fixed-range partitions write their value list as
+ * `VALUES [("lower"), ("upper"))` — a `[`-opened list closed by `)`
+ * (Apache Doris manual-partitioning docs). No sql-formatter grammar has a
+ * token rule for a bare `[`, so the lexer rejects the whole CREATE TABLE
+ * ("SQL格式化失败", issue #15321). Mask each list with a quoted placeholder
+ * before formatting and restore it verbatim afterwards, the same
+ * protect/restore shape as {@link protectDuckDbPrefixAliasSeparators}. A
+ * list closed with `]` instead is masked the same way. The scan is
+ * string-aware (single/double-quoted literals, backtick identifiers) so a
+ * `]` or `)` inside a value cannot end the list early; an unterminated list
+ * is left untouched so formatting fails exactly as it did before.
+ */
+function dorisPartitionListEnd(sql: string, start: number): number {
+  let depth = 0;
+  let index = start;
+  while (index < sql.length) {
+    const ch = sql[index];
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      index += 1;
+      while (index < sql.length) {
+        if (quote !== "`" && sql[index] === "\\" && index + 1 < sql.length) {
+          index += 2;
+          continue;
+        }
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) {
+            index += 2;
+            continue;
+          }
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      continue;
+    }
+    if (ch === "(") {
+      depth += 1;
+    } else if (ch === ")") {
+      if (depth === 0) return index + 1;
+      depth -= 1;
+    } else if (ch === "]" && depth === 0) {
+      return index + 1;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+function protectDorisPartitionValueLists(sql: string): { sql: string; markers: Map<string, string> } {
+  const markers = new Map<string, string>();
+  let namespace = 0;
+  while (sql.includes(`__DBX_DORIS_PARTITION_VALUES_${namespace}_`)) namespace += 1;
+
+  const pattern = /\bVALUES\s*\[/gi;
+  let output = "";
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(sql)) !== null) {
+    const bracketIndex = match.index + match[0].length - 1;
+    const end = dorisPartitionListEnd(sql, bracketIndex + 1);
+    if (end < 0) continue;
+    const marker = `__DBX_DORIS_PARTITION_VALUES_${namespace}_${markers.size}__`;
+    markers.set(marker, sql.slice(bracketIndex, end));
+    output += `${sql.slice(cursor, bracketIndex)}"${marker}"`;
+    cursor = end;
+    pattern.lastIndex = cursor;
+  }
+  output += sql.slice(cursor);
+  return { sql: markers.size > 0 ? output : sql, markers };
+}
+
+function restoreDorisPartitionValueLists(sql: string, markers: Map<string, string>): string {
+  if (markers.size === 0) return sql;
+  let restored = sql;
+  for (const [marker, original] of markers) {
+    restored = restored.split(`"${marker}"`).join(original);
+  }
+  return restored;
+}
+
 function protectBlockCommentLineEndings(sql: string, dialect: SqlFormatDialect): { sql: string; markers: Map<string, string> } {
   const markers = new Map<string, string>();
   if (!sql.includes("\r")) return { sql, markers };
@@ -481,6 +577,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   const emptyLineProtection = emptyLineMode === "remove" ? null : protectCodeEmptyLines(commentProtection.sql, dialect, emptyLineMode === "single");
   const sqlWithProtectedEmptyLines = emptyLineProtection?.sql ?? commentProtection.sql;
   const protectedInput = dialect === "duckdb" ? protectDuckDbPrefixAliasSeparators(sqlWithProtectedEmptyLines) : { sql: sqlWithProtectedEmptyLines, marker: null };
+  const dorisProtection = dialect === "doris" ? protectDorisPartitionValueLists(protectedInput.sql) : { sql: protectedInput.sql, markers: new Map<string, string>() };
   const formatterOptions =
     language === "postgresql"
       ? {
@@ -495,16 +592,15 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
           },
         }
       : options;
-  const resolvedDialect =
-    dialect === "mysql"
-      ? resolveMysqlFunctionSafeDialect(sqlFormatter)
-      : dialect === "clickhouse"
-        ? resolveClickHouseIdentifierSafeDialect(sqlFormatter)
-        : dialect === "oracle"
-          ? resolveOracleExtendedDialect(sqlFormatter)
-          : dialect === "postgres"
-            ? resolvePostgresMergeDialect(sqlFormatter)
-            : undefined;
+  const resolvedDialect = isMysqlFamilyDialect(dialect)
+    ? resolveMysqlFunctionSafeDialect(sqlFormatter)
+    : dialect === "clickhouse"
+      ? resolveClickHouseIdentifierSafeDialect(sqlFormatter)
+      : dialect === "oracle"
+        ? resolveOracleExtendedDialect(sqlFormatter)
+        : dialect === "postgres"
+          ? resolvePostgresMergeDialect(sqlFormatter)
+          : undefined;
   const formatWithFallback = (input: string): string => {
     try {
       if (resolvedDialect) {
@@ -536,7 +632,8 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
     const restoredDuckDbAliases = restoreDuckDbPrefixAliasSeparators(formatted, protectedInput.marker);
     const laidOut = appliedCustomRules ? normalizeLikeOperatorCase(restoredDuckDbAliases, normalizedSettings, dialect) : applySqlFormatterLayout(restoredDuckDbAliases, normalizedSettings, dialect);
     const restored = emptyLineProtection ? restoreProtectedEmptyLines(laidOut, emptyLineProtection.markers) : laidOut;
-    return commentProtection.markers.size ? restored.replace(/\/\*[+!]?__DBX_PRESERVE_BLOCK_COMMENT_\d+_\d+__\*\//g, (marker) => commentProtection.markers.get(marker) ?? marker) : restored;
+    const withComments = commentProtection.markers.size ? restored.replace(/\/\*[+!]?__DBX_PRESERVE_BLOCK_COMMENT_\d+_\d+__\*\//g, (marker) => commentProtection.markers.get(marker) ?? marker) : restored;
+    return restoreDorisPartitionValueLists(withComments, dorisProtection.markers);
   };
 
   // DBX's own layout printer produces the default `dbx` style. It needs the AST
@@ -582,7 +679,7 @@ export async function formatSqlText(sql: string, dialect: SqlFormatDialect = "ge
   };
 
   try {
-    return applyRoutineBlockLayout(finalizeFormattedSql(await formatOnce(protectedInput.sql)));
+    return applyRoutineBlockLayout(finalizeFormattedSql(await formatOnce(dorisProtection.sql)));
   } catch (err) {
     const trailingDot = dialect === "dameng" ? splitTrailingStandaloneDot(protectedInput.sql) : null;
     if (!trailingDot) throw err;
@@ -686,8 +783,8 @@ function maskStringAndCommentSpans(sql: string, dialect: SqlFormatDialect, prote
     }
 
     // 行注释 -- ... / # ...（不跨行，但遮罩可防御未来变更）
-    const startsDashComment = ch === "-" && next === "-" && (dialect !== "mysql" || isMysqlDashComment(sql[i + 2]));
-    if (startsDashComment || (dialect === "mysql" && ch === "#")) {
+    const startsDashComment = ch === "-" && next === "-" && (!isMysqlFamilyDialect(dialect) || isMysqlDashComment(sql[i + 2]));
+    if (startsDashComment || (isMysqlFamilyDialect(dialect) && ch === "#")) {
       const start = i;
       i += startsDashComment ? 2 : 1;
       while (i < len && sql[i] !== "\n" && sql[i] !== "\r") i++;
@@ -721,7 +818,7 @@ function maskStringAndCommentSpans(sql: string, dialect: SqlFormatDialect, prote
       const postgresEscapeString = dialect === "postgres" && (sql[i - 2] === "E" || sql[i - 2] === "e") && !isIdentifierPart(sql[i - 3]);
       while (i < len) {
         const c = sql[i];
-        if ((dialect === "mysql" || postgresEscapeString) && c === "\\" && i + 1 < len) {
+        if ((isMysqlFamilyDialect(dialect) || postgresEscapeString) && c === "\\" && i + 1 < len) {
           i += 2;
           continue;
         }
@@ -744,7 +841,7 @@ function maskStringAndCommentSpans(sql: string, dialect: SqlFormatDialect, prote
       const start = i;
       i++;
       while (i < len) {
-        if (dialect === "mysql" && sql[i] === "\\" && i + 1 < len) {
+        if (isMysqlFamilyDialect(dialect) && sql[i] === "\\" && i + 1 < len) {
           i += 2;
           continue;
         }
@@ -820,7 +917,7 @@ function keepLogicalOperatorsOnSameLine(sql: string, dialect: SqlFormatDialect =
 }
 
 function normalizeLikeOperatorCase(sql: string, settings: SqlFormatterSettings, dialect: SqlFormatDialect): string {
-  if ((dialect !== "mysql" && dialect !== "sqlite") || settings.keywordCase === "preserve") return sql;
+  if ((!isMysqlFamilyDialect(dialect) && dialect !== "sqlite") || settings.keywordCase === "preserve") return sql;
 
   // sql-formatter classifies LIKE as a reserved function in these dialects,
   // so an operator follows functionCase instead of keywordCase. Only adjust
@@ -846,7 +943,7 @@ function keepFromClauseAndFirstSourceOnSameLine(sql: string, indentStyle: SqlFor
     // Keep derived tables and leading comments multiline; merging these would
     // make nested SQL and comment boundaries substantially harder to read.
     const leadingSpan = source.startsWith("\x00") ? spans[Number(source.split("\x00", 3)[1])] : "";
-    if (source.startsWith("(") || leadingSpan.startsWith("/*") || leadingSpan.startsWith("--") || (dialect === "mysql" && leadingSpan.startsWith("#"))) continue;
+    if (source.startsWith("(") || leadingSpan.startsWith("/*") || leadingSpan.startsWith("--") || (isMysqlFamilyDialect(dialect) && leadingSpan.startsWith("#"))) continue;
 
     const clauseIndent = clauseMatch[1];
     const sourceIndent = sourceMatch[1];
@@ -1084,8 +1181,8 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
     }
 
     // MySQL additionally supports # comments and requires whitespace/control after --.
-    const startsDashComment = ch === "-" && next === "-" && (dialect !== "mysql" || isMysqlDashComment(sql[i + 2]));
-    if (startsDashComment || (dialect === "mysql" && ch === "#")) {
+    const startsDashComment = ch === "-" && next === "-" && (!isMysqlFamilyDialect(dialect) || isMysqlDashComment(sql[i + 2]));
+    if (startsDashComment || (isMysqlFamilyDialect(dialect) && ch === "#")) {
       i += startsDashComment ? 2 : 1;
       while (i < len && sql[i] !== "\n" && sql[i] !== "\r") i++;
       continue;
@@ -1116,7 +1213,7 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
       while (i < len) {
         const c = sql[i];
         // MySQL strings and PostgreSQL E'...' strings use backslash escapes.
-        if ((dialect === "mysql" || postgresEscapeString) && c === "\\" && i + 1 < len) {
+        if ((isMysqlFamilyDialect(dialect) || postgresEscapeString) && c === "\\" && i + 1 < len) {
           emit(c);
           emit(sql[i + 1]);
           i += 2;
@@ -1142,7 +1239,7 @@ export function compressSqlText(sql: string, dialect: SqlCompressDialect = "gene
       emit('"');
       i++;
       while (i < len) {
-        if (dialect === "mysql" && sql[i] === "\\" && i + 1 < len) {
+        if (isMysqlFamilyDialect(dialect) && sql[i] === "\\" && i + 1 < len) {
           emit(sql[i]);
           emit(sql[i + 1]);
           i += 2;

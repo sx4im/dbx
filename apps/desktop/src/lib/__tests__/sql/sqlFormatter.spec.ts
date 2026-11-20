@@ -137,6 +137,75 @@ describe("sqlFormatter", () => {
     expect(sqlFormatDialectForDbType("duckdb")).toBe("duckdb");
   });
 
+  it("maps Doris to its scoped formatter dialect", () => {
+    expect(sqlFormatDialectForDbType("doris")).toBe("doris");
+  });
+
+  it("formats a Doris CREATE TABLE with fixed-range partitions (issue #15321)", async () => {
+    // Doris fixed-range partitions write `VALUES [("lower"), ("upper"))` — a
+    // `[`-opened list closed by `)`. The generic dialect used to reject the
+    // whole statement ("SQL格式化失败") because no sql-formatter grammar has
+    // a token rule for a bare `[`.
+    const createTable = `CREATE TABLE IF NOT EXISTS example_db.table1
+(
+    \`user_id\` LARGEINT NOT NULL COMMENT "用户id",
+    \`date\` DATE NOT NULL COMMENT "数据灌入日期时间",
+    \`city\` VARCHAR(20) COMMENT "用户所在城市",
+    \`age\` SMALLINT COMMENT "用户年龄",
+    \`sex\` TINYINT COMMENT "用户性别",
+    \`last_visit_date\` DATETIME COMMENT "用户最后一次访问时间",
+    \`cost\` BIGINT DEFAULT "0" COMMENT "用户总消费",
+    \`max_dwell_time\` INT DEFAULT "0" COMMENT "用户最大停留时间",
+    \`min_dwell_time\` INT DEFAULT "0" COMMENT "用户最小停留时间"
+)
+ENGINE=OLAP
+DUPLICATE KEY(\`user_id\`, \`date\`, \`city\`, \`age\`, \`sex\`)
+PARTITION BY RANGE(\`date\`)
+(
+    PARTITION p202001 VALUES [("2020-01-01"), ("2020-02-01")),
+    PARTITION p202002 VALUES [("2020-02-01"), ("2020-03-01"))
+)
+DISTRIBUTED BY HASH(\`user_id\`) BUCKETS 32
+PROPERTIES
+(
+    "replication_allocation" = "tag.location.default: 1",
+    "storage_format" = "V2"
+);`;
+    const formatted = await formatSqlForEditing(createTable, sqlFormatDialectForDbType("doris"));
+
+    expect(formatted).not.toBe(createTable);
+    expect(formatted).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+    // The partition value lists survive formatting verbatim.
+    expect(formatted).toContain('[("2020-01-01"), ("2020-02-01"))');
+    expect(formatted).toContain('[("2020-02-01"), ("2020-03-01"))');
+    expect(formatted).toContain("ENGINE = OLAP");
+    expect(formatted).toContain("DUPLICATE KEY");
+    expect(formatted).toContain("PARTITION BY RANGE");
+    expect(formatted).toContain("DISTRIBUTED BY HASH");
+    expect(formatted).toContain("BUCKETS 32");
+    expect(formatted).toContain('"replication_allocation" = "tag.location.default: 1"');
+    expect(formatted).toContain('"storage_format" = "V2"');
+  });
+
+  it("formats other Doris partition forms without leaking the value-list mask", async () => {
+    const lessThan = `CREATE TABLE t (a DATE NOT NULL, b INT) ENGINE=OLAP DUPLICATE KEY(a) PARTITION BY RANGE(a) (PARTITION p1 VALUES LESS THAN ("2020-02-01"), PARTITION p2 VALUES LESS THAN ("2020-03-01")) DISTRIBUTED BY HASH(a) BUCKETS 8 PROPERTIES ("replication_num" = "1");`;
+    const list = `CREATE TABLE t (city VARCHAR(20) NOT NULL, id INT) ENGINE=OLAP DUPLICATE KEY(city) PARTITION BY LIST(city) (PARTITION p_cn VALUES IN ("Beijing", "Shanghai"), PARTITION p_usa VALUES IN ("New York")) DISTRIBUTED BY HASH(city) BUCKETS 4;`;
+    const bracketInValue = `CREATE TABLE t (d DATE NOT NULL) ENGINE=OLAP DUPLICATE KEY(d) PARTITION BY RANGE(d) (PARTITION p1 VALUES [("2020-01-0]1"), ("2020-02-01"))) DISTRIBUTED BY HASH(d) BUCKETS 2;`;
+
+    const formattedLessThan = await formatSqlForEditing(lessThan, sqlFormatDialectForDbType("doris"));
+    expect(formattedLessThan).toContain("VALUES LESS THAN");
+    expect(formattedLessThan).toContain("BUCKETS 8");
+
+    const formattedList = await formatSqlForEditing(list, sqlFormatDialectForDbType("doris"));
+    expect(formattedList).toContain("VALUES IN");
+    expect(formattedList).toContain("Beijing");
+
+    // A `]` inside a quoted partition value must not end the masked list early.
+    const formattedBracket = await formatSqlForEditing(bracketInValue, sqlFormatDialectForDbType("doris"));
+    expect(formattedBracket).toContain('[("2020-01-0]1"), ("2020-02-01"))');
+    expect(formattedBracket).not.toContain("__DBX_DORIS_PARTITION_VALUES_");
+  });
+
   it("maps Oracle and OceanBase Oracle mode to the PL/SQL formatter dialect", () => {
     expect(sqlFormatDialectForDbType("oracle")).toBe("oracle");
     // OceanBase Oracle mode speaks Oracle SQL — issue #7540: it must reuse the

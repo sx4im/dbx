@@ -31,6 +31,7 @@ type DdlColumnAttributePositions = {
 function canRenderUnquoted(identifier: string, dialect: SqlFormatDialect): boolean {
   switch (dialect) {
     case "mysql":
+    case "doris":
       return !requiresMysqlIdentifierQuote(identifier);
     case "clickhouse":
       return !requiresClickhouseIdentifierQuote(identifier);
